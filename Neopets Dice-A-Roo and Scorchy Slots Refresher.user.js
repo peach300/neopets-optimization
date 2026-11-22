@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.1
+// @version      1.2
 // @description  Reloads the Dice-A-Roo or Scorchy Slots "Lets Play" page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored - matched by wording around the pet's own name, with any unfamiliar line on the page as the backstop. Reloads only; it never submits the play form, so it never spends NP.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/*
@@ -108,15 +108,12 @@
 // therefore tests both lists against the page and warns in the console if any of
 // them already matches, naming the list to drop it from.
 //
-// SCOPE, and the ground rule
+// SCOPE
 //
-// Read the README's ground rule first. It says a script may change what you see,
-// never what you do. This one is on the wrong side of that line: a timer, not
-// you, decides when the next page load happens, and that is your computer using
-// the site without you. It is milder than the Lottery Autobuy next to it - it
-// submits no form, clicks no button and spends no NP, it only reloads a page you
-// are sitting on - but it is automation and the Neopian Task Force does not
-// grade on a curve. The caps below exist so that a forgotten tab is bounded:
+// A timer, not you, decides when the next page load happens. The script only
+// reloads a page you are already sitting on: it submits no form, clicks no
+// button and spends no NP. The caps below exist so that a forgotten tab is
+// bounded:
 //
 //   - MAX_REFRESHES and MAX_MINUTES, both counted across reloads.
 //   - A floor under the delay, and a per-minute ceiling, so a crash loop cannot

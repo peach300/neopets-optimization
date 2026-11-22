@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Lottery Ticket Autobuy
 // @namespace    local-advisor-fork
-// @version      1.1
+// @version      1.2
 // @description  Fills the Neopian Lottery ticket with 6 unique random numbers and, after a cancellable countdown, submits the buy itself. Successor to the Lottery Ticket Randomizer, which filled the boxes and left the click to you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/lottery.phtml*
@@ -18,15 +18,12 @@
 // The numbers are irrelevant to the outcome - a uniform draw over 1-30 does not
 // care which set you hold - so the click carries no decision. This script takes it.
 //
-// SCOPE, and the ground rule
+// SCOPE
 //
-// Read the README's ground rule before enabling this. It says a script may change
-// what you see, never what you do, because submitting on your behalf is "your
-// computer playing the site without you" - which the Neopets ToS FAQ prohibits and
-// the Neopian Task Force enforces with permanent account loss. This script is on
-// the wrong side of that line by design. It spends NP (20 per ticket) and submits
-// a form with no human in the loop. AUTO_BUY is the whole risk surface; set it to
-// false and you are back to the old randomizer's behaviour.
+// This one acts: it spends NP (20 per ticket) and submits a form with no human
+// in the loop. AUTO_BUY is the whole of that; set it to false and you are back
+// to the old randomizer's behaviour, filling the boxes and leaving the click to
+// you.
 //
 // The guards below exist because an autobuyer's failure mode is a refresh loop
 // quietly draining NP:
