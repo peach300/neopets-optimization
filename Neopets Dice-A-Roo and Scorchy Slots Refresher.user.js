@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.7
+// @version      1.8
 // @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -173,8 +173,9 @@
 // pet. The bounds on a forgotten tab are:
 //
 //   - MAX_REFRESHES, counted in plays, and MAX_MINUTES. Note what a burst does
-//     to the first of those: at two to four plays a round the 150-play cap
-//     arrives in about four minutes rather than twelve.
+//     to the first of those: at four to eight plays a round the play cap
+//     arrives in minutes, which is why it was raised to 400 when the burst
+//     grew. The time cap is the one doing the real bounding now.
 //   - A floor under the delay between rounds, a bounded burst, and a ceiling on
 //     plays per minute that holds the next round back rather than ending the
 //     run. A separate halt covers a rate only a bug could produce.
@@ -202,14 +203,22 @@
     // Plays per round, drawn from this range - the "held F5" part. They go one
     // at a time, each one's answer read before the next is built. 1 and 1 is
     // the old behaviour of one play a round.
-    BURST_MIN: 2,
-    BURST_MAX: 4,
+    //
+    // This is the throughput dial, and it is the right one to turn rather than
+    // the delays below: those are shaped to not look like a metronome, and
+    // flattening them to go faster would trade the one property worth having.
+    // A round of eight plays in a second and a half, then a human-looking
+    // pause, is both quicker and less regular than a short fixed interval.
+    BURST_MIN: 4,
+    BURST_MAX: 8,
 
     // Gap inside a burst, ms. A held key repeats far faster than this, but no
-    // browser finishes a page load in 30ms either, so a few hundred ms is
-    // about what holding F5 actually buys you.
-    BURST_GAP_MIN_MS: 150,
-    BURST_GAP_MAX_MS: 400,
+    // browser finishes a page load in 30ms either, so a hundred-odd ms is
+    // about what holding F5 actually buys you - and the site's own response
+    // time is added to each of these in practice, so a burst takes longer than
+    // the gaps alone suggest.
+    BURST_GAP_MIN_MS: 100,
+    BURST_GAP_MAX_MS: 250,
 
     // Delay between rounds, seconds, drawn uniformly from this range each
     // time. MIN is floored at 1 below whatever you put here.
@@ -222,8 +231,16 @@
     LONG_PAUSE_MIN_SECONDS: 12,
     LONG_PAUSE_MAX_SECONDS: 15,
 
-    // Hard stops, both counted across reloads for the current run.
-    MAX_REFRESHES: 150,
+    // Hard stops for the current run, counted across page loads.
+    //
+    // The play cap is 400 rather than 150 because of the burst: at 150 a run
+    // now ends in about two minutes, and since nobody has yet measured how
+    // many plays boredom actually takes, a cap that tight risks ending every
+    // run before the thing it exists to reach - leaving the panel's "last
+    // bored after N plays" line permanently blank, which is the one number
+    // that would settle it. 400 is about seven and a half minutes at the rate
+    // measured below, comfortably inside the time cap.
+    MAX_REFRESHES: 400,
     MAX_MINUTES: 25,
 
     // Ceiling on plays in any rolling 60 seconds. A throttle, not a halt: a
@@ -231,11 +248,19 @@
     // out, and then goes.
     //
     // Halting on this was right while a play meant a page load, when the only
-    // way to exceed it was a reload storm. With bursts it is not: the pacing
-    // above averages about 38 plays a minute at a 2-4 burst, and a run of
-    // minimum delays can honestly touch three figures, so a halt would kill
-    // good runs at random. Slowing one down is the better failure.
-    MAX_PLAYS_PER_MINUTE: 60,
+    // way to exceed it was a reload storm. With bursts it is not: a run of
+    // minimum delays can honestly reach the high hundreds a minute, so a halt
+    // would kill good runs at random. Slowing one down is the better failure.
+    //
+    // Set above what the pacing above actually produces, deliberately, so that
+    // the randomised delay stays the thing setting the rate and this stays a
+    // backstop. A 4-8 burst measured 53 plays a minute against a 250ms
+    // response time, and never once reached this ceiling over 82 seconds -
+    // each play waits for its own answer, so the site's latency is part of the
+    // loop and a slow site is a slower run. Only a fast stretch of minimum
+    // draws should ever touch this. If it engages constantly, the burst range
+    // is too big rather than this being too small.
+    MAX_PLAYS_PER_MINUTE: 120,
 
     // The boredom line itself - the thing the run is for. Checked before
     // anything else and on every load, including pages the script will not
