@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.4
-// @description  Reloads the Dice-A-Roo or Scorchy Slots page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored. Reloads only; it never submits a form, so it never spends NP.
+// @version      1.5
+// @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, for the pet-boredom mechanic, and stops itself when the page says the pet is bored. Each play submits the game's own form, which costs its usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
 // @match        *://www.neopets.com/games/play_dicearoo.phtml*
@@ -23,42 +23,56 @@
 // when to stop. The two things that make that worth scripting rather than
 // holding F5 down are the two things a human does badly - an interval that is
 // not a metronome, and noticing the stop signal on the first load it appears on
-// rather than fifty loads later.
+// rather than fifty loads later. What a "play" actually is turned out to be the
+// harder question, and the section below is the answer.
 //
-// WHICH PAGES A RELOAD IS A PLAY ON
+// A RELOAD IS NOT A PLAY
 //
-// The two games differ here, and assuming they were the same broke this twice.
-// Both captured pages are worth stating exactly.
+// This script began as a refresher, on the premise that reloading the landing
+// page is what "playing" means for the boredom mechanic. That premise is
+// wrong, at least for Scorchy Slots: reloading slots.phtml just re-serves the
+// same page and starts no game. The only thing that starts one is submitting
+// the form, so that is what the timer now does, and that is why this script
+// costs money.
 //
-//   Dice-A-Roo    /games/dicearoo.phtml is the landing page and posts to
-//                 /games/play_dicearoo.phtml with a hidden raah=init. The play
-//                 page is a separate document holding the roll state, so
-//                 reloading it re-posts a stale init and drops you back on the
-//                 landing page mid-game. Only the landing page is reloaded.
+// Each play costs the game's 5 NP, as playing it by hand would. SUBMIT_TO_PLAY
+// false puts the old reload back, which spends nothing and plays nothing.
 //
-//   Scorchy Slots /games/slots.phtml serves two different pages under one URL:
-//                 the landing form before a game (hidden play=yes, button
-//                 "Click Here to Play"), and the reels once a game is in
-//                 progress (form posting to process_slots2.phtml, button "Play
-//                 Again"). Both are reached by GET at that URL, so reloading
-//                 either is safe - no re-post, nothing lost - and both count.
+// The two games then differ in where the next play lives:
 //
-// That second case is the one that kept going wrong. The button's label was the
-// first gate, and "Click Here to Play" is not "Lets Play", so the script
-// silently ignored Scorchy Slots entirely: no panel, no run, no error. Keying
-// on the landing form's hidden field fixed that but was still too narrow, since
-// the site keeps serving the reels once you have played - so a run would start
-// and then stop itself on the very next load. Hence refreshable() per game,
-// which answers the only question that matters: is reloading *this* page a
-// play, or would it break something.
+//   Dice-A-Roo    /games/dicearoo.phtml carries the play form (hidden
+//                 raah=init, "Lets Play! (Costs 5 NP)"). Submitting it lands
+//                 you on /games/play_dicearoo.phtml, which holds the roll
+//                 state and offers no way to start another game - so the loop
+//                 walks back to the landing page and plays again. The walk
+//                 back is a GET of the landing URL, not a reload of the roll
+//                 page: reloading that one re-posts a stale init, which is
+//                 what produces the site's red wrong-place error.
 //
-// Nothing is ever submitted. On the reels page the script reloads, it does not
-// click Play Again - that would be a real spin at 5 NP each, and at the cap
-// that is 750 NP a run.
+//                 Note what this means: each cycle starts a game and then
+//                 abandons it, pot and all, to go back and start another. The
+//                 run is playing for boredom, not for Neopoints.
+//
+//   Scorchy Slots /games/slots.phtml serves two pages under one URL, and both
+//                 start a play: the landing form (hidden play=yes, "Click Here
+//                 to Play") before a game, and the reels (form posting to
+//                 process_slots2.phtml, "Play Again") once one is in progress.
+//                 The site keeps serving the reels after your first play, so a
+//                 long run spends almost all of it clicking Play Again, and no
+//                 walk back is needed.
+//
+// The label on those buttons is deliberately not what the script looks for.
+// Gating on "Lets Play" was the first version of this and it matched
+// Dice-A-Roo while silently ignoring Scorchy Slots, whose button reads "Click
+// Here to Play" - no panel, no run, no error. Each game is keyed on the hidden
+// field or the action URL of the form itself, and the submit control is then
+// taken from that form.
+//
+// Clicking the control rather than calling form.submit() sends the button's
+// own name/value pair, which form.submit() drops and which Neopets forms
+// sometimes dispatch on.
 //
 // @match names only dicearoo.phtml, play_dicearoo.phtml and slots.phtml.
-// Anything else is not a page of these two games, and a page that fails
-// refreshable() draws nothing and starts nothing.
 //
 // HOW IT KNOWS THE PET IS BORED
 //
@@ -84,9 +98,9 @@
 // tracks overall happiness and has nothing to say about being bored of one
 // particular game.
 //
-// Second, the line appears on a page that is not refreshable, so checking it
-// only on pages the script reloads would throw away the one outcome the run
-// exists to reach. The boredom check therefore runs first, on any page of the
+// Second, the line appears on a page the script does not play from, so checking
+// it only on pages that carry a play button would throw away the one outcome
+// the run exists to reach. The boredom check therefore runs first, on any page of the
 // game, and ends the run as a success wherever that line is served.
 //
 // BORED_PATTERNS is led by the captured line. Note its shape - no apostrophe in
@@ -121,6 +135,12 @@
   "use strict";
 
   const CONFIG = {
+    // Each play is a form submit, which is what actually starts a game and
+    // what the games charge their 5 NP for. False puts the original reload
+    // back, which is the off switch rather than an alternative: a reload
+    // starts no game, so it neither spends nor plays.
+    SUBMIT_TO_PLAY: true,
+
     // Delay between page loads, seconds, drawn uniformly from this range each
     // time. MIN is floored at 1 below whatever you put here.
     MIN_SECONDS: 1,
@@ -129,8 +149,8 @@
     // Every so often, take a longer break instead - the thing a person does and
     // a metronome does not. Chance per refresh, and the range of that break.
     LONG_PAUSE_CHANCE: 0.12,
-    LONG_PAUSE_MIN_SECONDS: 20,
-    LONG_PAUSE_MAX_SECONDS: 45,
+    LONG_PAUSE_MIN_SECONDS: 12,
+    LONG_PAUSE_MAX_SECONDS: 15,
 
     // Hard stops, both counted across reloads for the current run.
     MAX_REFRESHES: 150,
@@ -139,8 +159,8 @@
     // Ceiling on page loads in any rolling 60 seconds, regardless of the above.
     // This is a crash-loop backstop, not a pacing control, so it has to sit well
     // clear of what the delay range can produce on a fast stretch: at a 1s floor
-    // a minute of unlucky draws is nearly 60 loads, where the average with the
-    // long breaks folded in is nearer 9. Anything above 40 is a loop, not luck.
+    // a minute of unlucky draws is nearly 60 plays, where the average with the
+    // long breaks folded in is nearer 13. Anything above 40 is a loop, not luck.
     MAX_PER_MINUTE: 40,
 
     // The boredom line itself - the thing the run is for. Checked before
@@ -186,39 +206,71 @@
 
   // ------------------------------------------------------------------ the gate
 
-  // One entry per game. refreshable() answers the only question that matters:
-  // is reloading *this* page a play, or would it break something? The two games
-  // answer differently, and assuming they were the same is what broke this
-  // twice.
+  // One entry per game.
+  //
+  //   playButton()  the control on THIS page that starts a play, or null. A
+  //                 reload is not a play - that was the earlier design and it
+  //                 does not advance the mechanic - so this is what the timer
+  //                 clicks.
+  //
+  //   returnUrl     where to go when a run is live and this page has no play
+  //                 button. Dice-A-Roo needs it: starting a game lands you on
+  //                 play_dicearoo.phtml, which has no way to start another, so
+  //                 the loop walks back to the landing page. Scorchy Slots does
+  //                 not: its reels page carries "Play Again", so the next play
+  //                 is always right there.
   const GAMES = [
     {
       name: "Dice-A-Roo",
       title: /dice\s*-?\s*a\s*-?\s*roo/i,
-      // The landing page only, identified by the hidden field its form posts.
-      // play_dicearoo.phtml is a separate document holding the roll state, and
-      // reloading it re-posts a stale init, so it is read for the boredom line
-      // and never refreshed.
-      refreshable: () => !!document.querySelector('input[name="raah"][value="init"]'),
+      // Only on the landing page, found by the hidden field its form posts.
+      // Never on play_dicearoo.phtml, which holds the roll state.
+      playButton: () => {
+        const marker = document.querySelector('input[name="raah"][value="init"]');
+        return marker && marker.form ? submitOf(marker.form) : null;
+      },
+      // A fresh GET of the landing page. Walking back this way rather than
+      // reloading matters: play_dicearoo.phtml is a POST result, and reloading
+      // it re-posts a stale init, which is what gets you the site's red
+      // wrong-place error.
+      returnUrl: "/games/dicearoo.phtml",
     },
     {
       name: "Scorchy Slots",
       title: /scorchy/i,
-      // slots.phtml serves two different pages under one URL: the landing form
-      // before a game, and the reels once one is in progress. Both are reached
-      // by GET at that URL, so reloading either is safe - no re-post, no lost
-      // state. Gating on the landing form alone was wrong, because the site
-      // keeps serving the reels once you have played, so a run would start and
-      // then stop itself on the next load.
-      refreshable: () =>
-        !!document.querySelector('input[name="play"][value="yes"]')
-        || !!document.querySelector('form[action*="process_slots"]'),
+      // slots.phtml serves two pages under one URL, and both can start a play:
+      // the landing form (hidden play=yes, "Click Here to Play") before a game,
+      // and the reels (form posting to process_slots2.phtml, "Play Again") once
+      // one is in progress. The site keeps serving the reels after your first
+      // play, so the second case is the one a long run spends its time in.
+      playButton: () => {
+        const marker = document.querySelector('input[name="play"][value="yes"]');
+        if (marker && marker.form) return submitOf(marker.form);
+        const reels = document.querySelector('form[action*="process_slots"]');
+        return reels ? submitOf(reels) : null;
+      },
+      returnUrl: null,
     },
   ];
+
+  // The form's own submit control. Clicking it rather than calling
+  // form.submit() sends that button's name/value pair, which form.submit()
+  // drops and which Neopets forms sometimes dispatch on.
+  function submitOf(form) {
+    return form.querySelector('input[type="submit"], button[type="submit"], button:not([type])');
+  }
 
   const entry = GAMES.find((g) => g.title.test(document.title || ""));
   if (!entry) return;
   const game = entry.name;
-  const canRefresh = entry.refreshable();
+  const playBtn = entry.playButton();
+  // A page with no play button is still worth something on a game that can walk
+  // back to one - that is the Dice-A-Roo roll page mid-loop, not a dead end.
+  const canAct = !!playBtn || (!!entry.returnUrl && !onReturnUrl());
+
+  function onReturnUrl() {
+    return !!entry.returnUrl && location.pathname === entry.returnUrl;
+  }
 
   // --------------------------------------------------------------- the content
 
@@ -247,7 +299,8 @@
 
   const BLANK = {
     running: false,
-    count: 0,            // page loads this run
+    count: 0,            // steps this run (plays plus walk-backs)
+    plays: 0,            // plays actually submitted this run, which is the NP
     startedAt: 0,        // ms, this run
     nextAt: 0,           // ms, when the next load is due
     recent: [],          // ms timestamps of recent loads, for MAX_PER_MINUTE
@@ -316,8 +369,11 @@
       if (m) return `page matched ${re} ("${m[0]}") - look at the page`;
     }
 
-    if (state.count >= CONFIG.MAX_REFRESHES) {
-      return `refresh cap reached (${state.count}/${CONFIG.MAX_REFRESHES})`;
+    // Counted in plays, not steps: Dice-A-Roo's walk back to the landing page
+    // is a page load but not a game, and charging it against the cap would
+    // halve the run for no reason.
+    if (state.plays >= CONFIG.MAX_REFRESHES) {
+      return `play cap reached (${state.plays}/${CONFIG.MAX_REFRESHES})`;
     }
 
     const mins = (Date.now() - state.startedAt) / 60000;
@@ -349,13 +405,40 @@
     console.info(`${TAG} ${game}: next load in ${(ms / 1000).toFixed(1)}s`);
   }
 
-  // location.replace rather than reload(): a fresh GET, so no re-post prompt if
-  // the page was ever reached by one, and it overwrites the history entry
-  // instead of stacking a hundred and fifty of them in front of the Back button.
+  // One step of the loop. Three shapes, in order of what the page offers:
+  //
+  //   a play button   click it. This is the play.
+  //   a return URL    walk back to the page that has one. Not a play, not
+  //                   counted, and not charged.
+  //   neither         should not happen - canAct gates it - so say so loudly
+  //                   rather than spinning.
+  //
+  // Navigation uses location.replace so a long run leaves one history entry
+  // rather than a hundred and fifty in front of the Back button.
   function go() {
     state.nextAt = 0;
-    save();
-    location.replace(location.href);
+
+    if (playBtn && CONFIG.SUBMIT_TO_PLAY) {
+      // Counted and charged before the click, because the click navigates and
+      // nothing after it runs.
+      state.plays += 1;
+      save();
+      console.info(`${TAG} ${game}: play ${state.plays}`);
+      playBtn.click();
+      return;
+    }
+    if (playBtn) {
+      // SUBMIT_TO_PLAY off: the old reload, which starts no game.
+      save();
+      location.replace(location.href);
+      return;
+    }
+    if (entry.returnUrl) {
+      save();
+      location.replace(entry.returnUrl);
+      return;
+    }
+    halt("Stopped: nothing on this page starts a play.", "stop");
   }
 
   function start() {
@@ -371,6 +454,7 @@
     }
     state.running = true;
     state.count = 0;
+    state.plays = 0;
     state.startedAt = Date.now();
     state.note = "";
     state.noteKind = "stop";
@@ -589,7 +673,7 @@
 
     const body = document.createElement("div");
     body.id = "nprf-body";
-    vCount = addRow(body, "Loads");
+    vCount = addRow(body, "Plays");
     vNext = addRow(body, "Next");
 
     elNote = document.createElement("div");
@@ -631,9 +715,7 @@
     panel.dataset.running = state.running ? "1" : "0";
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
-    vCount.textContent = state.running || state.count
-      ? `${state.count} / ${CONFIG.MAX_REFRESHES}`
-      : `0 / ${CONFIG.MAX_REFRESHES}`;
+    vCount.textContent = `${state.plays} / ${CONFIG.MAX_REFRESHES}`;
 
     vNext.textContent = state.running && state.nextAt
       ? fmtSeconds(state.nextAt - Date.now())
@@ -645,7 +727,7 @@
     if (state.lastBored && !state.running) {
       const ago = Math.round((Date.now() - state.lastBored.at) / 60000);
       elHistory.textContent =
-        `Last bored after ${state.lastBored.count} loads, `
+        `Last bored after ${state.lastBored.count} plays, `
         + (ago < 1 ? "just now" : ago < 60 ? `${ago} min ago` : `${Math.round(ago / 60)}h ago`);
       elHistory.hidden = false;
     } else {
@@ -663,7 +745,7 @@
   // stale count. A run that has left the landing page has ended, and the store
   // has to say so. This is also the one place that can name *why*, since the
   // page that interrupted it is the page in front of us.
-  if (!canRefresh) {
+  if (!canAct) {
     clearInterval(tick);
     // The boredom check comes first, and deliberately runs on a page the script
     // will not refresh. The captured bored page is served at
@@ -674,7 +756,7 @@
     // outcome the run exists to reach, on the page that states it.
     const bored = checkBored();
     if (bored) {
-      if (state.running) state.lastBored = { at: Date.now(), count: state.count };
+      if (state.running) state.lastBored = { at: Date.now(), count: state.plays };
       state.running = false;
       state.nextAt = 0;
       state.note = `Pet is bored - run complete. ${bored}`;
@@ -691,7 +773,7 @@
       state.nextAt = 0;
       state.note = err
         ? "Stopped: the site served its wrong-place error. A reload of the *play* page does that - this script only ever reloads the landing page, so something else navigated."
-        : "Stopped: this page is not one a reload would play - the site served something else.";
+        : "Stopped: nothing here starts a play and there is no way back - the site served something else.";
       state.noteKind = "stop";
       save();
       console.info(`${TAG} ${game}: ${state.note}`);
@@ -731,10 +813,10 @@
     state.count += 1;
 
     // The boredom line first, before the faults and before the caps: if this
-    // load is both the 150th and the bored one, it is the bored one.
+    // load is both the last one and the bored one, it is the bored one.
     const bored = checkBored();
     if (bored) {
-      state.lastBored = { at: Date.now(), count: state.count };
+      state.lastBored = { at: Date.now(), count: state.plays };
       halt(`Pet is bored - run complete. ${bored}`, "bored");
     } else {
       const why = checkStops();
