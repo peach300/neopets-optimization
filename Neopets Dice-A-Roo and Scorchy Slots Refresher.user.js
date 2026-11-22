@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.6
-// @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, for the pet-boredom mechanic, and stops itself when the page says the pet is bored. Each play submits the game's own form, which costs its usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
+// @version      1.7
+// @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
 // @match        *://www.neopets.com/games/play_dicearoo.phtml*
@@ -70,9 +70,57 @@
 //
 // Clicking the control rather than calling form.submit() sends the button's
 // own name/value pair, which form.submit() drops and which Neopets forms
-// sometimes dispatch on.
+// sometimes dispatch on. The request built below appends that pair by hand for
+// the same reason.
 //
 // @match names only dicearoo.phtml, play_dicearoo.phtml and slots.phtml.
+//
+// PLAYING WITHOUT LEAVING THE PAGE
+//
+// Clicking the form navigates, and a navigation destroys the document that
+// scheduled it. That is the hard limit on queueing a few plays up the way
+// holding F5 down feels like it does: one document can submit exactly one
+// form, so there is nothing to queue behind it.
+//
+// Holding F5 does not really queue anything either. Each repeat aborts the
+// load before it, so the client ends up showing one page where the server may
+// have seen several - you cannot tell how many plays you bought, and you see
+// the answer to only the last. That is the unreliable version of what this now
+// does deliberately.
+//
+// A play is therefore sent as a request instead of a navigation. The form's
+// own method, action and fields are read off the element, the submit control's
+// name/value pair is appended the way a click would, and fetch sends it with
+// the session cookies. The document in front of you is never replaced, so one
+// round can send several plays.
+//
+// Serial, never parallel. Each answer is parsed before the next request is
+// built, and the next play's form is taken from that answer rather than from
+// the page, so a one-time field would travel correctly if either form ever
+// grew one, and Dice-A-Roo's state machine sees requests in the order a person
+// would produce them. Concurrent requests would be the least predictable thing
+// to do to that state machine and the loudest automation signal available.
+//
+// Two things fall out of this for free. The boredom line is read from the
+// answer to each individual play, so a run now ends on the play that produced
+// it rather than on the following page load. And Dice-A-Roo's walk back to the
+// landing page is a background GET, so a long run leaves the Back button alone
+// completely.
+//
+// One thing is worse: the page you are looking at goes stale the moment the
+// first background play lands. It still shows the form it was served with
+// while the server's idea of the game has moved on. Nothing reads the page
+// after that point, so this costs nothing mechanically - but the reels in
+// front of you are not the reels being played, and the button under your mouse
+// is a play the loop has already moved past.
+//
+// Whether the site counts a request-play the same as a click-play for the
+// boredom mechanic is the one thing here assumed rather than measured. The
+// request carries the same method, URL, fields and cookies; the only
+// difference is that it is not a navigation, which the site would have to be
+// reading fetch metadata to notice. If a run never reaches the boredom line,
+// that assumption is the first thing to doubt, and BACKGROUND_PLAYS false is
+// the way to test it.
 //
 // HOW IT KNOWS THE PET IS BORED
 //
@@ -119,15 +167,19 @@
 //
 // SCOPE
 //
-// A timer, not you, decides when the next page load happens. The script only
-// reloads a page you are already sitting on: it submits no form, clicks no
-// button and spends no NP. The caps below exist so that a forgotten tab is
-// bounded:
+// This script acts for you. A timer decides when the next play happens, it
+// sends the game's own form to make it happen, and each one spends the game's
+// 5 NP. It does not touch anything else: no other form, no shop, no bank, no
+// pet. The bounds on a forgotten tab are:
 //
-//   - MAX_REFRESHES and MAX_MINUTES, both counted across reloads.
-//   - A floor under the delay, and a per-minute ceiling, so a crash loop cannot
-//     hammer the site.
-//   - Halt on anything unfamiliar, as above.
+//   - MAX_REFRESHES, counted in plays, and MAX_MINUTES. Note what a burst does
+//     to the first of those: at two to four plays a round the 150-play cap
+//     arrives in about four minutes rather than twelve.
+//   - A floor under the delay between rounds, a bounded burst, and a ceiling on
+//     plays per minute that holds the next round back rather than ending the
+//     run. A separate halt covers a rate only a bug could produce.
+//   - Halt on anything unfamiliar, as above, now read from every single play's
+//     answer rather than once per page load.
 //   - It starts stopped. Running is a click, and it is remembered per game, so
 //     a reload you did not ask for does not resume a run you had finished.
 
@@ -141,7 +193,25 @@
     // starts no game, so it neither spends nor plays.
     SUBMIT_TO_PLAY: true,
 
-    // Delay between page loads, seconds, drawn uniformly from this range each
+    // Send the form's request instead of navigating to it, so the plays happen
+    // underneath the page you are on. This is what makes a burst possible at
+    // all - see PLAYING WITHOUT LEAVING THE PAGE above. False goes back to
+    // navigating, which is one play per page load and no bursts.
+    BACKGROUND_PLAYS: true,
+
+    // Plays per round, drawn from this range - the "held F5" part. They go one
+    // at a time, each one's answer read before the next is built. 1 and 1 is
+    // the old behaviour of one play a round.
+    BURST_MIN: 2,
+    BURST_MAX: 4,
+
+    // Gap inside a burst, ms. A held key repeats far faster than this, but no
+    // browser finishes a page load in 30ms either, so a few hundred ms is
+    // about what holding F5 actually buys you.
+    BURST_GAP_MIN_MS: 150,
+    BURST_GAP_MAX_MS: 400,
+
+    // Delay between rounds, seconds, drawn uniformly from this range each
     // time. MIN is floored at 1 below whatever you put here.
     MIN_SECONDS: 1,
     MAX_SECONDS: 6,
@@ -156,12 +226,16 @@
     MAX_REFRESHES: 150,
     MAX_MINUTES: 25,
 
-    // Ceiling on page loads in any rolling 60 seconds, regardless of the above.
-    // This is a crash-loop backstop, not a pacing control, so it has to sit well
-    // clear of what the delay range can produce on a fast stretch: at a 1s floor
-    // a minute of unlucky draws is nearly 60 plays, where the average with the
-    // long breaks folded in is nearer 13. Anything above 40 is a loop, not luck.
-    MAX_PER_MINUTE: 40,
+    // Ceiling on plays in any rolling 60 seconds. A throttle, not a halt: a
+    // round that would cross it waits until the oldest play in the window ages
+    // out, and then goes.
+    //
+    // Halting on this was right while a play meant a page load, when the only
+    // way to exceed it was a reload storm. With bursts it is not: the pacing
+    // above averages about 38 plays a minute at a 2-4 burst, and a run of
+    // minimum delays can honestly touch three figures, so a halt would kill
+    // good runs at random. Slowing one down is the better failure.
+    MAX_PLAYS_PER_MINUTE: 60,
 
     // The boredom line itself - the thing the run is for. Checked before
     // anything else and on every load, including pages the script will not
@@ -208,10 +282,12 @@
 
   // One entry per game.
   //
-  //   playButton()  the control on THIS page that starts a play, or null. A
-  //                 reload is not a play - that was the earlier design and it
-  //                 does not advance the mechanic - so this is what the timer
-  //                 clicks.
+  //   playForm(doc) the form in that document that starts a play, or null. It
+  //                 takes a document because the loop reads it both from the
+  //                 page and from the answer to the last play, which is where
+  //                 the next play's form comes from during a burst. A reload is
+  //                 not a play - that was the earlier design and it does not
+  //                 advance the mechanic - so this form is what gets sent.
   //
   //   returnUrl     where to go when a run is live and this page has no play
   //                 button. Dice-A-Roo needs it: starting a game lands you on
@@ -225,9 +301,9 @@
       title: /dice\s*-?\s*a\s*-?\s*roo/i,
       // Only on the landing page, found by the hidden field its form posts.
       // Never on play_dicearoo.phtml, which holds the roll state.
-      playButton: () => {
-        const marker = document.querySelector('input[name="raah"][value="init"]');
-        return marker && marker.form ? submitOf(marker.form) : null;
+      playForm: (doc) => {
+        const marker = doc.querySelector('input[name="raah"][value="init"]');
+        return marker ? marker.form : null;
       },
       // A fresh GET of the landing page. Walking back this way rather than
       // reloading matters: play_dicearoo.phtml is a POST result, and reloading
@@ -243,11 +319,10 @@
       // and the reels (form posting to process_slots2.phtml, "Play Again") once
       // one is in progress. The site keeps serving the reels after your first
       // play, so the second case is the one a long run spends its time in.
-      playButton: () => {
-        const marker = document.querySelector('input[name="play"][value="yes"]');
-        if (marker && marker.form) return submitOf(marker.form);
-        const reels = document.querySelector('form[action*="process_slots"]');
-        return reels ? submitOf(reels) : null;
+      playForm: (doc) => {
+        const marker = doc.querySelector('input[name="play"][value="yes"]');
+        if (marker && marker.form) return marker.form;
+        return doc.querySelector('form[action*="process_slots"]');
       },
       returnUrl: null,
     },
@@ -263,7 +338,8 @@
   const entry = GAMES.find((g) => g.title.test(document.title || ""));
   if (!entry) return;
   const game = entry.name;
-  const playBtn = entry.playButton();
+  const pageForm = entry.playForm(document);
+  const playBtn = pageForm ? submitOf(pageForm) : null;
   // A page with no play button is still worth something on a game that can walk
   // back to one - that is the Dice-A-Roo roll page mid-loop, not a dead end.
   const canAct = !!playBtn || (!!entry.returnUrl && !onReturnUrl());
@@ -280,15 +356,34 @@
   // their own and would read as new text on every single load. The boredom line
   // is in this column - the captured bored page puts it under the game's own
   // header - so nothing outside it needs reading.
-  function contentRoot() {
-    return document.querySelector("td.content")
-      || document.querySelector(".contentModule")
-      || document.querySelector("#content")
-      || document.body;
+  function contentRoot(doc) {
+    return doc.querySelector("td.content")
+      || doc.querySelector(".contentModule")
+      || doc.querySelector("#content")
+      || doc.body
+      || doc.documentElement;
+  }
+
+  // Takes a document, because the same reading is done on the page and on the
+  // answer to a background play.
+  function textOf(doc) {
+    const root = contentRoot(doc);
+    if (!root) return "";
+    // The live page has layout, so innerText is available and is the better
+    // reading: it is what a person sees.
+    if (doc === document) return (root.innerText || "").replace(/\s+/g, " ");
+    // A parsed answer has no layout and so no innerText. textContent is what
+    // there is, but it includes the contents of <script> and <style> - that is
+    // page source, not page text, and it is full of words a pattern could hit
+    // by accident. Strip those first, on a clone, so the page itself is left
+    // alone.
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
+    return (clone.textContent || "").replace(/\s+/g, " ");
   }
 
   function contentText() {
-    return (contentRoot().innerText || "").replace(/\s+/g, " ");
+    return textOf(document);
   }
 
   // ----------------------------------------------------------------- the store
@@ -303,7 +398,7 @@
     plays: 0,            // plays actually submitted this run, which is the NP
     startedAt: 0,        // ms, this run
     nextAt: 0,           // ms, when the next load is due
-    recent: [],          // ms timestamps of recent loads, for MAX_PER_MINUTE
+    recent: [],          // ms timestamps of recent plays, for the rate ceiling
     note: "",            // why it stopped, shown on the panel after a halt
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
     lastBored: null,     // {at, count} of the last boredom line, kept across runs
@@ -351,8 +446,8 @@
 
   // Did this load show the boredom line? Separate from the faults below because
   // it is the run's goal, and because it is worth recording when it happened.
-  function checkBored() {
-    const text = contentText();
+  function checkBored(text) {
+    if (text == null) text = contentText();
     for (const re of CONFIG.BORED_PATTERNS) {
       const m = text.match(re);
       if (m) return `page says "${m[0]}"`;
@@ -360,16 +455,21 @@
     return null;
   }
 
-  // Everything else that can end a run, checked on this load, in order of how
-  // much you would mind missing it.
-  function checkStops() {
+  // The faults, read off the page in front of us. Separate from the caps below
+  // because a burst checks the caps after every play and this against nothing -
+  // the page stops being a reliable account of the game as soon as the first
+  // background play lands, so each play's own answer is what gets read instead.
+  function checkPage() {
     const text = contentText();
-
     for (const re of CONFIG.HALT_PATTERNS) {
       const m = text.match(re);
       if (m) return `page matched ${re} ("${m[0]}") - look at the page`;
     }
+    return null;
+  }
 
+  // The bounds on the run itself, which hold wherever the plays are going.
+  function checkCaps() {
     // Counted in plays, not steps: Dice-A-Roo's walk back to the landing page
     // is a page load but not a game, and charging it against the cap would
     // halve the run for no reason.
@@ -382,9 +482,30 @@
       return `time cap reached (${Math.round(mins)}/${CONFIG.MAX_MINUTES} min)`;
     }
 
-    const minute = Date.now() - 60000;
-    if (state.recent.filter((t) => t > minute).length > CONFIG.MAX_PER_MINUTE) {
-      return `rate ceiling hit (>${CONFIG.MAX_PER_MINUTE} loads/min) - something is looping`;
+    // Not the per-minute ceiling, which is a throttle and lives in schedule().
+    // This is the rate no amount of bad luck explains: a full burst every
+    // second for ten seconds, which means something is looping.
+    const absurd = CONFIG.BURST_MAX * 10;
+    const tenSeconds = Date.now() - 10000;
+    if (state.recent.filter((t) => t > tenSeconds).length > absurd) {
+      return `rate went impossible (>${absurd} plays/10s) - something is looping`;
+    }
+
+    return null;
+  }
+
+  // What an answer to a background play says, if it says anything that ends the
+  // run. Same two lists as the page, in the same order: the boredom line is the
+  // point of the run, so it is read before the faults.
+  function inspect(doc) {
+    const text = textOf(doc);
+
+    const bored = checkBored(text);
+    if (bored) return { note: `Pet is bored - run complete. ${bored}`, kind: "bored" };
+
+    for (const re of CONFIG.HALT_PATTERNS) {
+      const m = text.match(re);
+      if (m) return { note: `A play came back matching ${re} ("${m[0]}") - look at the game`, kind: "stop" };
     }
 
     return null;
@@ -399,16 +520,210 @@
     return Math.round((lo + Math.random() * (hi - lo)) * 1000);
   }
 
-  function schedule() {
-    const ms = pickDelay();
-    state.nextAt = Date.now() + ms;
-    save();
-    console.info(`${TAG} ${game}: next load in ${(ms / 1000).toFixed(1)}s`);
+  function burstSize() {
+    const lo = Math.max(1, CONFIG.BURST_MIN);
+    const hi = Math.max(lo, CONFIG.BURST_MAX);
+    return lo + Math.floor(Math.random() * (hi - lo + 1));
   }
 
-  // One step of the loop. Three shapes, in order of what the page offers:
+  function burstGap() {
+    const lo = Math.max(0, CONFIG.BURST_GAP_MIN_MS);
+    const hi = Math.max(lo, CONFIG.BURST_GAP_MAX_MS);
+    return Math.round(lo + Math.random() * (hi - lo));
+  }
+
+  // The per-minute ceiling as a wait rather than a verdict. If the last minute
+  // is already full, the next round is due when the oldest play in that window
+  // leaves it - which is the earliest moment the round could run without
+  // breaking the ceiling, so this costs nothing but the wait.
+  function throttledUntil() {
+    const minute = Date.now() - 60000;
+    const window = state.recent.filter((t) => t > minute);
+    const cap = CONFIG.MAX_PLAYS_PER_MINUTE;
+    if (window.length < cap) return 0;
+    return window[window.length - cap] + 60000;
+  }
+
+  function schedule() {
+    const ms = pickDelay();
+    const hold = throttledUntil();
+    state.nextAt = Math.max(Date.now() + ms, hold);
+    save();
+    const wait = (state.nextAt - Date.now()) / 1000;
+    console.info(
+      `${TAG} ${game}: next round in ${wait.toFixed(1)}s`
+      + (hold > Date.now() + ms ? ` (held back: ${CONFIG.MAX_PLAYS_PER_MINUTE} plays/min ceiling)` : "")
+    );
+  }
+
+  // ------------------------------------------------------------- the request
   //
-  //   a play button   click it. This is the play.
+  // A play as an HTTP request rather than a navigation, built from the form
+  // itself so nothing about either game's fields is hardcoded here.
+
+  function resolve(raw, base) {
+    try {
+      return new URL(raw || base, base).href;
+    } catch {
+      return base;
+    }
+  }
+
+  function requestFor(form, base) {
+    const method = (form.getAttribute("method") || "GET").toUpperCase();
+    const url = resolve(form.getAttribute("action"), base);
+    const data = new FormData(form);
+
+    // The submit control's own name/value pair. A click sends it and
+    // FormData(form) does not include it, exactly as form.submit() drops it -
+    // and Neopets forms sometimes dispatch on precisely that pair.
+    const submit = submitOf(form);
+    if (submit && submit.name) data.append(submit.name, submit.value || "");
+
+    if (method === "GET") {
+      const qs = new URLSearchParams(data).toString();
+      const [bare] = url.split("#");
+      return {
+        url: qs ? `${bare}${bare.includes("?") ? "&" : "?"}${qs}` : bare,
+        init: { method: "GET" },
+      };
+    }
+
+    // Classic Neopets forms are urlencoded; honour an enctype if one says
+    // otherwise rather than mangling the body.
+    if ((form.getAttribute("enctype") || "").toLowerCase().includes("multipart")) {
+      return { url, init: { method: "POST", body: data } };
+    }
+    return {
+      url,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(data).toString(),
+      },
+    };
+  }
+
+  async function fetchDoc(url, init) {
+    const res = await fetch(url, Object.assign(
+      { credentials: "same-origin", redirect: "follow" },
+      init,
+    ));
+    const html = await res.text();
+    return {
+      doc: new DOMParser().parseFromString(html, "text/html"),
+      url: res.url || url,
+      status: res.status,
+    };
+  }
+
+  // ------------------------------------------------------------- the burst
+  //
+  // Where the next play comes from. It starts as the form on the page and
+  // afterwards is whatever form the last answer carried, so the chain follows
+  // the server's state instead of replaying the page's.
+  let nextForm = pageForm;
+  let nextBase = location.href;
+  let busy = false;
+
+  function sleep(ms) {
+    return new Promise((done) => setTimeout(done, ms));
+  }
+
+  // One play, end to end: find a form if the last answer had none, send it,
+  // read what came back. Returns null to carry on, or the reason to stop.
+  async function playOnce() {
+    if (!nextForm) {
+      // Dice-A-Roo: the answer to a play is the roll page, which carries no way
+      // to start another, so walk back to the landing page for a fresh form.
+      // The same walk back the navigating version did, as a request.
+      if (!entry.returnUrl) {
+        return { note: "Stopped: nothing offers another play.", kind: "stop" };
+      }
+      const back = await fetchDoc(resolve(entry.returnUrl, location.href), { method: "GET" });
+      if (back.status >= 400) {
+        return { note: `Stopped: the landing page answered ${back.status}.`, kind: "stop" };
+      }
+      const said = inspect(back.doc);
+      if (said) return said;
+      nextForm = entry.playForm(back.doc);
+      nextBase = back.url;
+      if (!nextForm) {
+        return { note: "Stopped: the landing page came back with no play form.", kind: "stop" };
+      }
+    }
+
+    const req = requestFor(nextForm, nextBase);
+
+    // Counted before the request, not after: a play that was sent counts
+    // whether or not its answer arrives, and the cost is incurred either way.
+    state.plays += 1;
+    state.recent.push(Date.now());
+    save();
+
+    const got = await fetchDoc(req.url, req.init);
+    console.info(`${TAG} ${game}: play ${state.plays} -> ${got.status}`);
+    if (got.status >= 400) {
+      return { note: `Stopped: a play answered ${got.status}.`, kind: "stop" };
+    }
+
+    nextBase = got.url;
+    nextForm = entry.playForm(got.doc);
+    return inspect(got.doc);
+  }
+
+  // A round: a handful of plays, one at a time. The run can end on any of
+  // them, which is the point of reading each answer rather than the next page.
+  async function burst() {
+    if (busy) return;
+    busy = true;
+    state.nextAt = 0;
+    render();
+    try {
+      const want = burstSize();
+      for (let i = 0; i < want; i += 1) {
+        if (!state.running) return;
+
+        let said;
+        try {
+          said = await playOnce();
+        } catch (err) {
+          console.warn(`${TAG} ${game}: play request failed`, err);
+          halt(`Stopped: a play could not be sent (${err && err.message}).`, "stop");
+          return;
+        }
+
+        if (said) {
+          if (said.kind === "bored") state.lastBored = { at: Date.now(), count: state.plays };
+          halt(said.note, said.kind);
+          return;
+        }
+
+        state.count += 1;
+        save();
+        render();
+
+        const why = checkCaps();
+        if (why) {
+          halt(why, "stop");
+          return;
+        }
+        if (i + 1 < want) await sleep(burstGap());
+      }
+      schedule();
+      render();
+    } finally {
+      busy = false;
+    }
+  }
+
+  // One step of the loop. Four shapes, in order of what is available:
+  //
+  //   background      send the round's plays as requests, leaving the page
+  //                   alone. The default, and the only shape that can do more
+  //                   than one play, since the others navigate.
+  //   a play button   click it. This is the play, and it is the last thing this
+  //                   document does.
   //   a return URL    walk back to the page that has one. Not a play, not
   //                   counted, and not charged.
   //   neither         should not happen - canAct gates it - so say so loudly
@@ -419,10 +734,16 @@
   function go() {
     state.nextAt = 0;
 
+    if (CONFIG.SUBMIT_TO_PLAY && CONFIG.BACKGROUND_PLAYS) {
+      burst();
+      return;
+    }
+
     if (playBtn && CONFIG.SUBMIT_TO_PLAY) {
       // Counted and charged before the click, because the click navigates and
       // nothing after it runs.
       state.plays += 1;
+      state.recent.push(Date.now());
       save();
       console.info(`${TAG} ${game}: play ${state.plays}`);
       playBtn.click();
@@ -747,8 +1068,13 @@
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
     vCount.textContent = `${state.plays} / ${CONFIG.MAX_REFRESHES}`;
+    vCount.title = `${state.plays} plays this run, cap ${CONFIG.MAX_REFRESHES}`;
 
-    if (state.running && state.nextAt) {
+    if (state.running && busy) {
+      // Mid-round. There is no countdown to show, because the plays are in
+      // flight rather than pending.
+      vNext.textContent = "playing";
+    } else if (state.running && state.nextAt) {
       vNext.textContent = fmtSeconds(state.nextAt - Date.now());
       startClock();
     } else {
@@ -820,7 +1146,11 @@
 
   // ------------------------------------------------------------------- the run
 
-  state.recent = state.recent.filter((t) => t > Date.now() - 120000).concat(Date.now());
+  // Trimmed, not appended to: these are plays, and a page load is not one.
+  // Appending here was right while every play was a page load; with background
+  // plays it would count a reload of the page as a play and throttle the run
+  // against something that cost nothing.
+  state.recent = state.recent.filter((t) => t > Date.now() - 120000);
 
   // Checked while idle, which is when you would read it. A pattern the page's
   // ordinary text happens to contain would end a run on its first load, every
@@ -853,7 +1183,7 @@
       state.lastBored = { at: Date.now(), count: state.plays };
       halt(`Pet is bored - run complete. ${bored}`, "bored");
     } else {
-      const why = checkStops();
+      const why = checkPage() || checkCaps();
       if (why) halt(why, "stop");
       else { schedule(); render(); }
     }
