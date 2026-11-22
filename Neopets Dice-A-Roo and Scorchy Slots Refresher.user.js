@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.2
-// @description  Reloads the Dice-A-Roo or Scorchy Slots "Lets Play" page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored - matched by wording around the pet's own name, with any unfamiliar line on the page as the backstop. Reloads only; it never submits the play form, so it never spends NP.
+// @version      1.3
+// @description  Reloads the Dice-A-Roo or Scorchy Slots landing page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored, with any unfamiliar line in the game's own column as the backstop. Reloads only; it never submits the play form, so it never spends NP.
 // @author       Austin Ryder
-// @match        *://www.neopets.com/games/*
-// @match        *://neopets.com/games/*
+// @match        *://www.neopets.com/games/dicearoo.phtml*
+// @match        *://www.neopets.com/games/play_dicearoo.phtml*
+// @match        *://www.neopets.com/games/slots.phtml*
+// @match        *://neopets.com/games/dicearoo.phtml*
+// @match        *://neopets.com/games/play_dicearoo.phtml*
+// @match        *://neopets.com/games/slots.phtml*
 // @grant        none
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/peach300/neopets-optimization/main/Neopets%20Dice-A-Roo%20and%20Scorchy%20Slots%20Refresher.user.js
@@ -23,21 +27,40 @@
 //
 // THE REFRESH HAS TO COME FROM THE LANDING PAGE
 //
-// Dice-A-Roo's landing page posts to play_dicearoo.phtml with raah=init, and the
-// play page is a different document that holds the roll state. Reloading that
-// one re-posts a stale init and drops you back on the landing page mid-game, or
-// worse, half-charged. So this script refuses to run anywhere except a landing
-// page, and it checks that by content rather than by URL:
+// The two games are laid out differently, and both captured pages are worth
+// stating exactly, because an earlier version of this gate silently stood the
+// script down on one of them.
 //
-//   - the document title names Dice-A-Roo or Scorchy Slots, and
-//   - the page carries a submit button whose value reads "Lets Play!".
+//   Dice-A-Roo   landing /games/dicearoo.phtml, which posts to
+//                /games/play_dicearoo.phtml with a hidden raah=init. The play
+//                page is a separate document holding the roll state, so
+//                reloading it re-posts a stale init and drops you back on the
+//                landing page mid-game. Its button reads "Lets Play! (Costs 5 NP)".
 //
-// The play pages have the title but no such button. That pair is also the reason
-// @match is the whole /games/ directory: Scorchy Slots' landing path is spelled
-// differently in different places (slots.phtml, scorchyslots.phtml) and the live
-// site 403s an unauthenticated probe, so rather than hardcode a guess the script
-// matches broadly and gates hard. Any other page under /games/ fails the gate on
-// the first line of run() and the script does nothing at all - no panel, no
+//   Scorchy Slots  landing /games/slots.phtml, which posts to *itself* with a
+//                hidden play=yes. Landing and play therefore share one URL, so
+//                no URL test can tell them apart. Its button reads "Click Here
+//                to Play" - not "Lets Play", which is why a gate written around
+//                that one phrase matched Dice-A-Roo and silently ignored
+//                Scorchy Slots: no panel, no run, no error.
+//
+// So the gate is per game and keyed on the landing form's own hidden field,
+// which is the one thing on each page that says "this is the page that starts a
+// game" rather than "this is a page about this game":
+//
+//   - the document title names the game, and
+//   - its landing marker is present (raah=init / play=yes), and
+//   - no button on the page reads "Play Again".
+//
+// The last is a guard for Scorchy Slots specifically. Its play page is one URL
+// I have not captured; the rules text on the landing page says a new game is
+// started with a "Play Again" button, so if that page also carries play=yes the
+// title and marker alone would not separate them. If it turns out the slots play
+// page is distinguishable some other way, tighten LANDING_MARKER rather than
+// loosening this.
+//
+// @match now names only those three paths. Anything else is not a page of these
+// two games, and a page that fails the gate does nothing at all - no panel, no
 // timer, no listeners.
 //
 // HOW IT KNOWS THE PET IS BORED - TWO LAYERS
@@ -57,14 +80,14 @@
 //     Im SO BORED of Dice-A-Roo... let's play something else!
 //     Click here for the Games Room!
 //
-// Two things follow, and both were guesses before.
+// Two things follow.
 //
-// First, the sidebar is not the signal. On that same page the pet's Mood field
-// still read "cheerful". Mood tracks overall happiness and says nothing about
-// being bored of one game, so HALT_ON_BORED_MOOD is off, the mood is shown on
-// the panel and nothing more, and it is not coloured green with the rest of the
-// panel at the end of a run - on the page that ends a run it says "cheerful",
-// and colouring that as the outcome would say the opposite of what it means.
+// First, the line is in the game's own column, so that column is the only part
+// of the page this script reads. The sidebar is not read at all - not for the
+// pet's name, not for its Mood. Mood would have been the obvious signal and is
+// the wrong one: on that same bored page it still said "cheerful", because it
+// tracks overall happiness and has nothing to say about being bored of one
+// particular game.
 //
 // Second, the line does not appear on the landing page, so the gate below would
 // stand the script down on the very page that announces the result and report
@@ -72,18 +95,9 @@
 // to reach. The boredom check therefore runs *before* the gate, on any page of
 // this game, and a bored page ends the run as a success wherever it is served.
 //
-// Layer one is wording. BORED_PATTERNS leads with the captured line: no
-// apostrophe in "Im", and "SO" with a single o, which an earlier guess
-// requiring "soo" would have missed. Beside it the script builds a precise
-// matcher at runtime from the active pet's name as the sidebar gives it -
-// <name> within 60 characters of bored / boring / tired / had enough / fed up,
-// in either order, for a line phrased "<name> is bored of this game" or "This
-// game is boring, says <name>". Proximity to the pet's own name is what keeps
-// that one off the rules text.
-//
-// Both read the content column AND the sidebar's pet module, since a line the
-// pet speaks could sit beside its portrait rather than in the column, and a
-// column-only scan could not see it.
+// Layer one is wording: BORED_PATTERNS, led by the captured line. Note the
+// shape of it - no apostrophe in "Im", and "SO" with a single o, which an
+// earlier guess requiring "soo" would have missed.
 //
 // Layer two exists because none of those wordings is one I could verify, and
 // matching only a guessed string would mean refreshing straight past the one
@@ -105,8 +119,10 @@
 // Both wording lists are checked on every load, learnt or not, so a pattern the
 // page's own text happens to contain would end every run on load one - and a
 // BORED_PATTERNS hit would do it while reporting success. The learning pass
-// therefore tests both lists against the page and warns in the console if any of
-// them already matches, naming the list to drop it from.
+// therefore tests both lists against the column and warns in the console if any
+// of them already matches, naming the list to drop it from. Scorchy Slots makes
+// that worth having: its landing page prints the full rules, which is a lot more
+// prose for a pattern to collide with than Dice-A-Roo's.
 //
 // SCOPE
 //
@@ -163,18 +179,16 @@
     // into the baseline during learning still ends the run. Matching one of
     // these is a finished run, not a fault, and the panel says so.
     //
-    // Beside these the script tries one built from the active pet's own name
-    // (see boredPattern): <name> within 60 characters of bored / tired / enough
-    // / fed up. That is the precise one, since the site's pet messages are
-    // phrased around the name; the list here is what catches it if the sidebar
-    // name cannot be read or the line names the pet some other way.
+    // Matched against the game's own column only - the pet's sidebar is not
+    // read. The list is deliberately broader than the one captured line, since
+    // Scorchy Slots' wording for this has not been seen.
     BORED_PATTERNS: [
       // The captured line, verbatim: "Im SO BORED of Dice-A-Roo... let's play
       // something else!", in the content column, over a picture of the pet.
       // No apostrophe, and "SO" with a single o - an earlier guess at this
       // required "soo" and would have missed it. The vowel is left stretchable
       // in case it varies, and the pronoun optional for a third-person
-      // rendering ("<name> is so bored of...").
+      // rendering ("... is so bored of ...").
       /(?:\bi'?m\s+|\bis\s+)?so+\s+bored\s+of\b/i,
       /\bbored\b/i,
       // The line that goes with it, as a second reading of the same page.
@@ -185,17 +199,6 @@
       /\bdoes ?n[o']?t want to play\b/i,
       /\bwon'?t play (?:any ?more|again)\b/i,
     ],
-
-    // Stop when the sidebar's own Mood field matches. OFF, and this one is
-    // settled rather than cautious: on a captured bored page - the one headed
-    // "Im SO BORED of Dice-A-Roo" - the sidebar still read "Mood: cheerful".
-    // The Mood field tracks overall happiness and has nothing to say about
-    // being bored of a particular game, so it cannot end this run. It is read
-    // for the panel, and that is all. Switching this on costs nothing while
-    // the mood stays off the low end of the ladder, and start() refuses to
-    // start on an already-matching mood so it cannot stop a run on load one.
-    HALT_ON_BORED_MOOD: false,
-    BORED_MOOD: /bored/i,
 
     // Other wordings worth stopping for, which are faults rather than a finished
     // run. Same always-checked treatment as the boredom list.
@@ -214,36 +217,48 @@
 
   // ------------------------------------------------------------------ the gate
 
-  // Which game this is, by title. Returns null for anything else under /games/.
-  function identifyGame() {
-    const t = (document.title || "").toLowerCase();
-    if (t.includes("dice-a-roo") || t.includes("dice a roo")) return "Dice-A-Roo";
-    if (t.includes("scorchy")) return "Scorchy Slots";
-    return null;
-  }
+  // One entry per game. LANDING_MARKER is the hidden field the landing form
+  // carries and nothing else does - it is what the form posts to start a game,
+  // so it marks the page that starts one. Matching on that rather than on the
+  // button's label is what makes this work for both games at once: the labels
+  // differ ("Lets Play! (Costs 5 NP)" against "Click Here to Play") and a gate
+  // written around either one ignores the other without saying so.
+  const GAMES = [
+    {
+      name: "Dice-A-Roo",
+      title: /dice\s*-?\s*a\s*-?\s*roo/i,
+      LANDING_MARKER: 'input[name="raah"][value="init"]',
+    },
+    {
+      name: "Scorchy Slots",
+      title: /scorchy/i,
+      LANDING_MARKER: 'input[name="play"][value="yes"]',
+    },
+  ];
 
-  // The landing page's own marker: the button that starts a game. Its absence is
-  // what keeps this script off the play pages, off the post-game pages, and off
-  // any error or rate-limit page the site substitutes.
-  function landingButton() {
-    const els = document.querySelectorAll('input[type="submit"], button');
-    for (const el of els) {
-      const label = (el.value || el.textContent || "").trim();
-      if (/^let'?s\s*play\b/i.test(label)) return el;
+  // Any button that starts a *further* game rather than the first one. Scorchy
+  // Slots' landing page describes its play page as having one, and that play
+  // page shares the landing URL, so this is the separator of last resort.
+  function hasPlayAgain() {
+    for (const el of document.querySelectorAll('input[type="submit"], button')) {
+      if (/play again/i.test((el.value || el.textContent || ""))) return true;
     }
-    return null;
+    return false;
   }
 
-  const game = identifyGame();
-  if (!game) return;
-  const onLanding = !!landingButton();
+  const entry = GAMES.find((g) => g.title.test(document.title || ""));
+  if (!entry) return;
+  const game = entry.name;
+  const onLanding = !!document.querySelector(entry.LANDING_MARKER) && !hasPlayAgain();
 
   // --------------------------------------------------------------- the content
 
-  // The baseline reads the game's own column and nothing else: the sidebar
-  // carries the pet's stats and the Neofriends list, and the premium footer
-  // carries bank balances and a stock table, all of which change on their own
-  // and would read as new text on every single load.
+  // Everything this script reads is the game's own column and nothing else.
+  // The sidebar carries the pet's stats and the Neofriends list and the premium
+  // footer carries bank balances and a stock table, all of which change on
+  // their own and would read as new text on every single load. The boredom line
+  // is in this column - the captured bored page puts it under the game's own
+  // header - so nothing outside it needs reading.
   function contentRoot() {
     return document.querySelector("td.content")
       || document.querySelector(".contentModule")
@@ -251,52 +266,20 @@
       || document.body;
   }
 
-  // The sidebar's pet module - portrait, species, health, Mood, hunger - found
-  // by the portrait cell rather than by position, since the sidebar's modules
-  // are a list whose order and membership vary by page.
-  function petModule() {
-    const cell = document.querySelector(".sidebarTable .activePet, .sidebarTable .activePetInfo");
-    return cell ? cell.closest(".sidebarModule") || cell.closest(".sidebarTable") : null;
-  }
-
-  // What the boredom check reads: the content column AND the pet module. The
-  // pet says it is bored beside its own portrait, in the sidebar, which is
-  // outside td.content - so a content-only scan cannot see the one line the run
-  // exists to catch. The baseline below still reads the column alone.
-  function watchedText() {
-    const parts = [contentRoot(), petModule()]
-      .filter(Boolean)
-      .map((el) => el.innerText || "");
-    return parts.join(" \n ").replace(/\s+/g, " ");
+  function contentText() {
+    return (contentRoot().innerText || "").replace(/\s+/g, " ");
   }
 
   // Lines of that column, digits flattened to "#" so the jackpot figure and the
   // NP totals do not each count as a sentence never seen before.
   function contentLines() {
-    const text = (contentRoot().innerText || "").replace(/ /g, " ");
+    const text = (contentRoot().innerText || "").replace(/\u00a0/g, " ");
     const out = [];
     for (const raw of text.split("\n")) {
       const line = raw.replace(/[\d,]+/g, "#").replace(/\s+/g, " ").trim();
       if (line.length >= 12) out.push(line);
     }
     return out;
-  }
-
-  // The sidebar's Mood value, read from the cell labelled "Mood:" rather than by
-  // position in that little stats table.
-  function petMood() {
-    for (const td of document.querySelectorAll("#content td, .sidebarTable td")) {
-      if (/^mood:?$/i.test((td.textContent || "").trim())) {
-        const v = td.nextElementSibling;
-        if (v) return (v.textContent || "").trim();
-      }
-    }
-    return null;
-  }
-
-  function petName() {
-    const a = document.querySelector('.sidebarHeader a[href*="quickref"]');
-    return a ? (a.textContent || "").trim() : null;
   }
 
   // ----------------------------------------------------------------- the store
@@ -357,33 +340,10 @@
     render();
   }
 
-  // The precise boredom matcher: the pet's own name within 60 characters of a
-  // boredom word, in either order, since the line could be "<name> is bored of
-  // this game" or "This game is boring, says <name>". Null when the sidebar
-  // name cannot be read, in which case BORED_PATTERNS alone does the work.
-  function boredPattern() {
-    const name = petName();
-    if (!name || !/^[\w' -]{2,24}$/.test(name)) return null;
-    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const w = "(?:bored|boring|tired|had enough|fed up)";
-    return new RegExp(`(?:${n}[\\s\\S]{0,60}${w}|${w}[\\s\\S]{0,60}${n})`, "i");
-  }
-
   // Did this load show the boredom line? Separate from the faults below because
   // it is the run's goal, and because it is worth recording when it happened.
   function checkBored() {
-    // The mood first: it is a field with one value, not a message that has to be
-    // caught on the load it appears on, so it is the least fragile of the three.
-    if (CONFIG.HALT_ON_BORED_MOOD) {
-      const mood = petMood();
-      if (mood && CONFIG.BORED_MOOD.test(mood)) return `sidebar mood reads "${mood}"`;
-    }
-    const text = watchedText();
-    const named = boredPattern();
-    if (named) {
-      const m = text.match(named);
-      if (m) return `"${m[0].replace(/\s+/g, " ").trim().slice(0, 90)}"`;
-    }
+    const text = contentText();
     for (const re of CONFIG.BORED_PATTERNS) {
       const m = text.match(re);
       if (m) return `page says "${m[0]}"`;
@@ -394,7 +354,7 @@
   // Everything else that can end a run, checked on this load, in order of how
   // much you would mind missing it.
   function checkStops() {
-    const text = watchedText();
+    const text = contentText();
 
     for (const re of CONFIG.HALT_PATTERNS) {
       const m = text.match(re);
@@ -578,15 +538,6 @@
       font-feature-settings: "tnum" 1 !important;
       letter-spacing: 0 !important;
     }
-    /* The mood is the signal the run is driving, so it is read as prose rather
-       than as a figure: full width, wrapping, no monospace. */
-    #nprf-mood {
-      padding: 3px 0 1px !important; border-top: 1px solid #dce8f6 !important;
-      color: #22303f !important; font: 10.5px/1.4 ${MUSEO} !important;
-    }
-    /* The mood deliberately does NOT turn green with the rest of the panel on a
-       finished run. On the captured bored page it still read "cheerful", so
-       colouring it as the outcome would say the opposite of what it means. */
     #nprf-note {
       margin-top: 5px !important; padding-top: 5px !important;
       border-top: 1px solid #cfe0f2 !important;
@@ -653,7 +604,7 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  let panel, vCount, vNext, elMood, elNote, elHistory, btnRun;
+  let panel, vCount, vNext, elNote, elHistory, btnRun;
 
   // One row of the body: a label that ellipsises and a value that does not move.
   function addRow(parent, label) {
@@ -694,10 +645,6 @@
     body.id = "nprf-body";
     vCount = addRow(body, "Loads");
     vNext = addRow(body, "Next");
-
-    elMood = document.createElement("div");
-    elMood.id = "nprf-mood";
-    body.appendChild(elMood);
 
     elNote = document.createElement("div");
     elNote.id = "nprf-note";
@@ -765,10 +712,6 @@
     } else {
       vNext.textContent = "—";
     }
-
-    const mood = petMood();
-    const name = petName();
-    elMood.textContent = mood ? `${name || "Pet"} is ${mood}` : "mood not on this page";
 
     elNote.textContent = state.note || "";
     elNote.hidden = !state.note;
@@ -852,7 +795,7 @@
     // would do it while reporting the run a success. Say so now rather than
     // then. Dice-A-Roo's rules talk about losing and proceeding and name no
     // moods, but Scorchy Slots' text is not something I could read to check.
-    const text = watchedText();
+    const text = contentText();
     const lists = [["BORED_PATTERNS", CONFIG.BORED_PATTERNS], ["HALT_PATTERNS", CONFIG.HALT_PATTERNS]];
     for (const [which, list] of lists) {
       for (const re of list) {
@@ -863,13 +806,6 @@
           );
         }
       }
-    }
-    const named = boredPattern();
-    if (named && named.test(text)) {
-      console.warn(
-        `${TAG} ${game}: the pet-name boredom pattern ${named} already matches this`
-        + " page's ordinary text. Any run will end on load one."
-      );
     }
   }
 
