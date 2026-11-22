@@ -1,0 +1,2489 @@
+// ==UserScript==
+// @name         # Neopets Daily Timers
+// @namespace    local-advisor-fork
+// @version      1.1
+// @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
+// @author       Austin Ryder
+// @match        *://www.neopets.com/*
+// @match        *://neopets.com/*
+// @match        *://www.jellyneo.net/*
+// @match        *://jellyneo.net/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        unsafeWindow
+// @license      MIT
+// @downloadURL  https://raw.githubusercontent.com/peach300/neopets-optimization/main/Neopets%20Daily%20Timers.user.js
+// @updateURL    https://raw.githubusercontent.com/peach300/neopets-optimization/main/Neopets%20Daily%20Timers.user.js
+// ==/UserScript==
+//
+// WHAT THIS IS
+//
+// The Healing Springs countdown in this folder, generalised. Neopets has
+// dozens of activities on a clock and tells you the remaining time for almost
+// none of them, so the clock is kept here instead: one panel, a row per
+// activity you have switched on, sorted by whichever is ready first.
+//
+// The cadences come from Jellyneo's dailies list (jellyneo.net/?go=dailies),
+// read on 2026-11-18. Three kinds are tracked, because three kinds is what
+// Neopets actually has:
+//
+//   interval — a cooldown measured from your last visit. Healing Springs is
+//              30 minutes, Buried Treasure 3 hours, Coltzan's Shrine 13, the
+//              Expellibox an odd 7h07m.
+//   daily    — resets at midnight NST for everyone at once. The row reads
+//              "ready" until it is ticked off, then counts down to that
+//              midnight. The reset time is exact; whether you have been today
+//              is the part this browser has to be told, by your click on the
+//              page or by the tick in the panel.
+//   window   — open during fixed NST hours: the Snowager's three one-hour
+//              slots, Deadly Dice between midnight and 1am. The row counts
+//              down to the next opening, or says how long the window has left.
+//
+// HOW A VISIT IS DETECTED, AND HOW MUCH TO TRUST IT
+//
+// A userscript cannot ask the server when you last went, so for everything
+// except the fixed windows a visit has to be noticed here. Each row is one of:
+//
+//   read from the page — the page states the outcome and the script reads it.
+//              Healing Springs is the worked example: the faerie's result
+//              text, the refusal, and the "no healing powers today" that still
+//              burns the half hour. This is as good as it gets.
+//   the page's own request — most of H5 does its dailies over AJAX, so the
+//              script watches what the page itself sends: a same-origin POST
+//              or AJAX call from the tracked page is the action happening, not
+//              a guess that it might have. Collecting bank interest POSTs to
+//              process_bank.php; a classic page's form submit counts the same
+//              way. Requests fired while the page is still loading are
+//              ignored, as is a list of calls the site makes by itself (the
+//              notification poll, the Quest Log pane refreshing, bookmarking),
+//              which would otherwise tick things off for merely arriving.
+//   from your click — last resort: a button, a submit, or a link that acts on
+//              the page rather than leaving it. A plain link elsewhere does
+//              not count, so walking away from the Shrine no longer marks it.
+//
+// A better source overwrites a worse one, never the other way round, so a
+// stray click cannot overwrite what the page itself said.
+//
+// Every row says which it is, and every row can be set or cleared by hand, so
+// a wrong guess is never a dead end. Nothing here ever acts for you: the
+// request watcher reads the method and URL of calls the page was making
+// anyway, passes them through untouched, and sends nothing of its own.
+//
+// WHAT IS DELIBERATELY NOT HERE
+//
+// Activities whose timing is random or unknowable from the client: Tarla,
+// Smuggler's Cove, the Kadoatery, faerie quests, restocks, Turmaculus (its
+// waking hours are predicted, not published), Ye Olde Fishing Vortex. A
+// countdown for those would be a made-up number wearing a clock's face.
+//
+// Per-day allowances are counted rather than timed, which is the fourth kind
+// of row: Coconut Shy and Bagatelle show "4/20 used" and only turn into a
+// countdown once the day's tries are gone. Game high-score limits (three
+// plays of Hasee Bounce) and the scavenging ones (10-13 items from the Money
+// Tree) are left out — those are per-game rules rather than one clock, and a
+// row saying "ready" for them would mean nothing.
+//
+// BROKEN PAGES
+//
+// Some of these dailies' own pages are Flash and have been dead for years,
+// while the handler they used to post to still works and still pays out:
+// Coconut Shy, Bagatelle, and the Qasalan Expellibox. Those rows link to the
+// handler, which the settings can switch back to the real page. Opening such
+// a link IS the play, so the panel counts it the moment you click; for the
+// Expellibox, whose handler lives on ncmall.neopets.com — another origin this
+// script neither runs on nor can read — that click is the only signal there
+// will ever be.
+//
+// SCOPE: reads the page, keeps timestamps, draws countdowns, alerts on zero.
+// It does not visit, claim, spin, bet or submit anything.
+
+(function () {
+  "use strict";
+
+  // ------------------------------------------------------- cross-origin bits
+  //
+  // Two things need care because this script runs on two different sites.
+  //
+  // STORAGE. localStorage belongs to one origin, so what the guide reads on
+  // jellyneo.net cannot be written where the panel on neopets.com will find
+  // it. Framing one site from the other is out — Jellyneo sends
+  // X-Frame-Options: SAMEORIGIN — and fetching it is out too, since it sends
+  // no access-control-allow-origin. The one store that spans both is the
+  // userscript manager's own, GM_setValue/GM_getValue, which is why this
+  // script asks for those two grants and nothing else.
+  //
+  // PAGE CONTEXT. Asking for any grant moves the script into the manager's
+  // sandbox, where `window` is a wrapper rather than the page's own object —
+  // and the request-watching detection works by wrapping the page's fetch and
+  // XMLHttpRequest. `unsafeWindow` is the page's real window, so the patching
+  // targets that. If a manager does not provide it, or refuses the write, the
+  // script says so once and carries on: the text and click sources still
+  // work, only the request source is lost.
+  const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+
+  const SHARED = (() => {
+    const ok =
+      typeof GM_setValue === "function" && typeof GM_getValue === "function";
+    return {
+      ok,
+      get(key, fallback = null) {
+        if (!ok) return fallback;
+        try {
+          const raw = GM_getValue(key, null);
+          if (raw === null || raw === undefined) return fallback;
+          return typeof raw === "string" ? JSON.parse(raw) : raw;
+        } catch {
+          return fallback;
+        }
+      },
+      set(key, value) {
+        if (!ok) return;
+        try {
+          GM_setValue(key, JSON.stringify(value));
+        } catch (err) {
+          console.warn("[Neo Timers] shared store write failed", err);
+        }
+      },
+    };
+  })();
+
+  // ------------------------------------------------------------------ config
+
+  const DEFAULTS = {
+    corner: "bottom-left",
+    notify: true,
+    beep: true,
+    beepGain: 0.08,
+    flashTitle: true,
+    // Hide rows that are still counting down, leaving only what is ready.
+    readyOnly: false,
+    // Rows past this are scrolled rather than drawn down the whole screen.
+    maxRows: 12,
+    // Point the rows whose own page is broken at the handler that still
+    // works. Off means the row links to the real page, broken or not.
+    useBypass: true,
+    // Drop the names and let each activity's icon stand for it, which halves
+    // the panel's width. The name is still in the row's tooltip.
+    compact: false,
+    // Open a row in its own tab, leaving whatever you were reading alone.
+    newTab: true,
+    // {trackerId: {minute, day}} — a window that has to be told to us, with
+    // the NST day it was told for. See the Symol Hole.
+    hourlyWindows: {},
+  };
+
+  const SETTINGS_KEY = "np_timers_settings";
+  const STATE_KEY = "np_timers_state";
+  const LEGACY_SPRINGS_KEY = "np_healing_springs_state";
+  const TAG = "[Neo Timers]";
+
+  // --------------------------------------------------------------- registry
+  //
+  // One entry per activity. `path` is matched against the start of the URL's
+  // pathname, lowercased, so "/faerieland/caverns/" covers index.phtml and
+  // anything else under it.
+  //
+  //   type: "interval" → `mins` is the cooldown
+  //         "daily"    → resets at midnight NST
+  //         "window"   → `windows` are [startHour, endHour) in NST
+  //   used / refused: result-text patterns, for the few pages that state the
+  //         outcome plainly. Without them a row is detected from your click.
+  //   on: on by default, before you touch the settings (the Default button
+  //       in the settings footer puts this set back).
+  //   action: the control that counts as doing it, matched against a button's
+  //       text, value or href. Without one, any button or action link in the
+  //       page body counts.
+
+  const MIN = 1;
+  const HOUR = 60;
+  const DAY = 24 * HOUR;
+
+  const TRACKERS = [
+    // ---- cooldowns ------------------------------------------------------
+    {
+      id: "springs",
+      name: "Healing Springs",
+      cat: "Freebies",
+      path: "/faerieland/springs.phtml",
+      type: "interval",
+      mins: 30,
+      on: true,
+      // The faerie states the outcome, so this one is read rather than
+      // guessed. "No healing powers today" still burns the half hour, which is
+      // why it counts as a visit; the refusal keeps any timer already running.
+      //
+      // These patterns are result sentences only. "hit points" used to be in
+      // here and was the bug behind a timer that started on arrival: the idle
+      // page lists every pet's hit points, so merely opening the springs read
+      // as a heal.
+      used: /(has|have) been fully healed|fully healed your|no healing powers|given you (a|an|some)[^.]{0,40}(potion|healing)/i,
+      refused: /once every half|every half an hour|already visited|come back later/i,
+      // Only this control counts as doing it. Without it, any click in the
+      // page body would start the half hour — including a click on one of
+      // your own pets.
+      action: /heal/i,
+    },
+    {
+      id: "poogle",
+      name: "Poogle Racing",
+      cat: "Gambling",
+      path: "/faerieland/poogleracing.phtml",
+      type: "interval",
+      mins: 15,
+    },
+    {
+      id: "mediocrity",
+      name: "Wheel of Mediocrity",
+      cat: "Wheels",
+      path: "/prehistoric/mediocrity.phtml",
+      type: "interval",
+      mins: 40,
+      on: true,
+    },
+    {
+      id: "meteor",
+      name: "Meteor",
+      cat: "Freebies",
+      path: "/moon/meteor.phtml",
+      type: "interval",
+      mins: 1 * HOUR,
+      note: "Hourly, but only one prize a day.",
+    },
+    {
+      id: "symol",
+      name: "Symol Hole",
+      cat: "Petpets",
+      path: "/medieval/symolhole.phtml",
+      // Both a window and a cooldown, and the window is not knowable from
+      // here. Per Jellyneo: every hour has the same 4-minute prize window
+      // that day (e.g. XX:57:00–XX:59:59), the minute changes daily, some
+      // days have none at all, and the window never wraps past :59:59. An
+      // attempt inside it starts a cooldown of exactly one hour; an attempt
+      // outside it does nothing at all, and the page reads the same either
+      // way. So the minute is a setting you fill in from Jellyneo's guide,
+      // dated, and forgotten again the next NST day rather than quietly
+      // going stale.
+      type: "window",
+      hourly: 4,
+      cooldownMins: 60,
+      note: "4 minutes every hour; the minute changes daily (Jellyneo publishes it).",
+      guide: "https://www.jellyneo.net/?go=symolhole",
+      // How today's window reads on that page, and how to tell whether the
+      // page is actually today's: "November 20th Hourly Prize Window:" sits
+      // right above "XX:57:00 to XX:59:59".
+      guideWindow: /XX:(\d{2}):\d{2}\s*(?:to|[\u2013\u2014-])\s*XX:\d{2}:\d{2}/i,
+      guideDate: /([A-Z][a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)\s+Hourly Prize Window/,
+      guideNone: /no (?:valid )?window (?:at all )?today|prizes cannot be won today/i,
+      action: /enter|jump|dive|cannonball|bellyflop|climb/i,
+    },
+    {
+      id: "excitement",
+      name: "Wheel of Excitement",
+      cat: "Wheels",
+      path: "/faerieland/wheel.phtml",
+      type: "interval",
+      mins: 2 * HOUR,
+      on: true,
+    },
+    {
+      id: "misfortune",
+      name: "Wheel of Misfortune",
+      cat: "Wheels",
+      path: "/halloween/wheel/",
+      type: "interval",
+      mins: 2 * HOUR,
+    },
+    {
+      id: "hauntedkiosk",
+      name: "Haunted Fairgrounds Scratchcard",
+      cat: "Scratchcards",
+      path: "/halloween/scratch.phtml",
+      type: "interval",
+      mins: 2 * HOUR,
+    },
+    {
+      id: "buriedtreasure",
+      name: "Buried Treasure",
+      cat: "Freebies",
+      path: "/pirates/buriedtreasure/",
+      type: "interval",
+      mins: 3 * HOUR,
+      on: true,
+    },
+    {
+      id: "desertkiosk",
+      name: "Desert Scratchcard Kiosk",
+      cat: "Scratchcards",
+      path: "/desert/sc/kiosk.phtml",
+      type: "interval",
+      mins: 4 * HOUR,
+    },
+    {
+      id: "gravedanger",
+      name: "Grave Danger",
+      cat: "Petpets",
+      path: "/halloween/gravedanger/",
+      type: "interval",
+      mins: 4 * HOUR,
+      note: "Anywhere from 4 to 10 hours — this counts the earliest.",
+      on: true,
+    },
+    {
+      id: "icekiosk",
+      name: "Ice Caves Scratchcard Kiosk",
+      cat: "Scratchcards",
+      path: "/winter/kiosk.phtml",
+      type: "interval",
+      mins: 6 * HOUR,
+    },
+    {
+      id: "strength",
+      name: "Test Your Strength",
+      cat: "Freebies",
+      path: "/halloween/strtest/",
+      type: "interval",
+      mins: 6 * HOUR,
+      on: true,
+    },
+    {
+      id: "expellibox",
+      name: "Qasalan Expellibox",
+      cat: "Freebies",
+      // Jellyneo's link for this one points at an NC giveaway page; the
+      // Expellibox itself is here.
+      path: "/desert/expellibox.phtml",
+      type: "interval",
+      mins: 7 * HOUR + 7 * MIN,
+      on: true,
+      // The lever is one of the dailies whose own page no longer works. Its
+      // handler does, and it lives on ncmall.neopets.com — a different origin,
+      // so nothing there can be watched from here (see the comment on
+      // BYPASS_NOTE). The click on the row's link is what marks it.
+      bypass: "https://ncmall.neopets.com/games/giveaway/process_giveaway.phtml",
+    },
+    {
+      id: "illusen",
+      name: "Illusen's Glade",
+      cat: "Quests",
+      path: "/medieval/earthfaerie.phtml",
+      type: "interval",
+      mins: 12 * HOUR,
+    },
+    {
+      id: "jhudora",
+      name: "Jhudora's Bluff",
+      cat: "Quests",
+      path: "/faerieland/darkfaerie.phtml",
+      type: "interval",
+      mins: 12 * HOUR,
+    },
+    {
+      id: "shrine",
+      name: "Coltzan's Shrine",
+      cat: "Freebies",
+      path: "/desert/shrine.phtml",
+      type: "interval",
+      mins: 13 * HOUR,
+      on: true,
+    },
+    {
+      id: "braintree",
+      name: "Brain Tree Quests",
+      cat: "Quests",
+      path: "/halloween/braintree.phtml",
+      type: "interval",
+      mins: 24 * HOUR,
+    },
+    {
+      id: "hiddentower",
+      name: "Hidden Tower",
+      cat: "Shops",
+      path: "/faerieland/hiddentower",
+      type: "interval",
+      mins: 24 * HOUR,
+      note: "One purchase every 24 hours.",
+    },
+    {
+      id: "magmapool",
+      name: "Magma Pool",
+      cat: "Pets",
+      path: "/magma/pool.phtml",
+      type: "interval",
+      mins: 8 * DAY,
+      note: "Also has a per-account minute each day — this is the 8-day wait.",
+    },
+
+    // ---- midnight NST ---------------------------------------------------
+    { id: "trudy", name: "Trudy's Surprise", cat: "Freebies", path: "/trudys_surprise.phtml", type: "daily", on: true },
+    { id: "tombola", name: "Tombola", cat: "Freebies", path: "/island/tombola.phtml", type: "daily", on: true },
+    { id: "fruitmachine", name: "Fruit Machine", cat: "Freebies", path: "/desert/fruitmachine.phtml", type: "daily", on: true },
+    { id: "applebobbing", name: "Apple Bobbing", cat: "Freebies", path: "/halloween/applebobbing.phtml", type: "daily" },
+    { id: "anchor", name: "Anchor Management", cat: "Freebies", path: "/pirates/anchormanagement.phtml", type: "daily" },
+    { id: "forgottenshore", name: "Forgotten Shore", cat: "Freebies", path: "/pirates/forgottenshore.phtml", type: "daily" },
+    { id: "desertedtomb", name: "Deserted Tomb", cat: "Freebies", path: "/worlds/geraptiku/tomb.phtml", type: "daily" },
+    { id: "omelette", name: "Giant Omelette", cat: "Freebies", path: "/prehistoric/omelette.phtml", type: "daily", on: true },
+    { id: "jelly", name: "Giant Jelly", cat: "Freebies", path: "/jelly/jelly.phtml", type: "daily", on: true },
+    { id: "lunar", name: "Lunar Temple", cat: "Freebies", path: "/shenkuu/lunar/", type: "daily" },
+    { id: "neggcave", name: "Mysterious Negg Cave", cat: "Freebies", path: "/shenkuu/neggcave/", type: "daily" },
+    { id: "darkcave", name: "Dark Cave", cat: "Freebies", path: "/magma/darkcave.phtml", type: "daily" },
+    { id: "quarry", name: "Moltara Quarry", cat: "Freebies", path: "/magma/quarry.phtml", type: "daily" },
+    { id: "council", name: "Council Chamber", cat: "Freebies", path: "/altador/council.phtml", type: "daily" },
+    { id: "wiseking", name: "Wise Old King", cat: "Freebies", path: "/medieval/wiseking.phtml", type: "daily" },
+    { id: "grumpyking", name: "Grumpy Old King", cat: "Freebies", path: "/medieval/grumpyking.phtml", type: "daily", note: "Twice a day." },
+    {
+      id: "marrow",
+      name: "Guess the Marrow's Weight",
+      cat: "Freebies",
+      path: "/medieval/guessmarrow.phtml",
+      type: "daily",
+      // Your guess is once a day, but the day does not begin at midnight: the
+      // competition starts on the hour at a random time (seen anywhere from
+      // 1am to 10pm NST) and ends early the moment ten people have guessed
+      // right. So "ready" here only ever means "worth a look", and the three
+      // messages below are what the page actually says.
+      randomStart: true,
+      note: "One guess a day. The competition starts on a random hour (1am\u201310pm NST) and ends once ten people guess right.",
+      used: /you have had your guess for today|competition has already been won/i,
+      notyet: /competition has not started yet|marrows take a while to grow/i,
+    },
+    { id: "crossword", name: "Faerie Crossword", cat: "Freebies", path: "/games/crossword/", type: "daily" },
+    { id: "dailypuzzle", name: "Daily Puzzle", cat: "Freebies", path: "/community/", type: "daily" },
+    { id: "kikopop", name: "Kiko Pop", cat: "Freebies", path: "/worlds/kiko/kpop/", type: "daily" },
+    { id: "grundo", name: "Blue Grundo Plushie", cat: "Freebies", path: "/faerieland/tdmbgpop.phtml", type: "daily" },
+    { id: "caverns", name: "Faerie Caverns", cat: "Freebies", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
+    { id: "bank", name: "Bank Interest", cat: "Freebies", path: "/bank.phtml", type: "daily", on: true },
+    { id: "questlog", name: "Quest Log", cat: "Quests", path: "/questlog/", type: "daily", on: true },
+    { id: "lab", name: "Lab Ray", cat: "Pets", path: "/lab.phtml", type: "daily", on: true },
+    { id: "petpetlab", name: "Petpet Lab Ray", cat: "Petpets", path: "/petpetlab.phtml", type: "daily" },
+    { id: "coincidence", name: "The Coincidence", cat: "Freebies", path: "/space/coincidence.phtml", type: "daily" },
+    { id: "mystic", name: "Island Mystic", cat: "Freebies", path: "/island/mystichut.phtml", type: "daily" },
+    { id: "haiku", name: "Haiku Generator", cat: "Freebies", path: "/island/haiku/", type: "daily" },
+    { id: "pickyourown", name: "Pick Your Own", cat: "Shops", path: "/medieval/pickyourown", type: "daily" },
+    { id: "lottery", name: "Neopian Lottery", cat: "Gambling", path: "/games/lottery.phtml", type: "daily" },
+    { id: "extravagance", name: "Wheel of Extravagance", cat: "Wheels", path: "/desert/extravagance.phtml", type: "daily" },
+    { id: "knowledge", name: "Wheel of Knowledge", cat: "Wheels", path: "/medieval/knowledge.phtml", type: "daily" },
+    { id: "monotony", name: "Wheel of Monotony", cat: "Wheels", path: "/prehistoric/monotony/", type: "daily" },
+    { id: "starlight", name: "Wheel of Starlight", cat: "Wheels", path: "/premium/wheel.phtml", type: "daily" },
+    { id: "ticketbooth", name: "Tyrannian Ticket Booth", cat: "Freebies", path: "/prehistoric/ticketbooth.phtml", type: "daily" },
+    { id: "shopofoffers", name: "Rich Slorg (Shop of Offers)", cat: "Freebies", path: "/shop_of_offers.phtml", type: "daily" },
+    { id: "tyrannianticket", name: "Tyrannian Battleground", cat: "Battledome", path: "/prehistoric/battleground/", type: "daily" },
+
+    // ---- fixed NST windows ----------------------------------------------
+    // ---- per-day allowances ---------------------------------------------
+    // Counted rather than timed: twenty tries a day, so the row shows how many
+    // are gone instead of a countdown, and only starts counting down once the
+    // allowance is spent. Both of these are Deserted Fairground games whose
+    // own pages are Flash and dead; their handlers still work.
+    {
+      id: "cocoshy",
+      name: "Coconut Shy",
+      cat: "Fairground",
+      path: "/halloween/coconutshy.phtml",
+      type: "allowance",
+      uses: 20,
+      bypass: "https://www.neopets.com/halloween/process_cocoshy.phtml?coconut=4",
+      bypassPath: "/halloween/process_cocoshy.phtml",
+      note: "20 throws a day, 100 NP each.",
+    },
+    {
+      id: "corkgun",
+      name: "Cork Gun Gallery",
+      cat: "Fairground",
+      path: "/halloween/corkgun.phtml",
+      type: "allowance",
+      uses: 20,
+      bypass: "https://www.neopets.com/halloween/process_corkgun.phtml",
+      bypassPath: "/halloween/process_corkgun.phtml",
+      note: "20 shots a day.",
+    },
+    {
+      id: "bagatelle",
+      name: "Bagatelle",
+      cat: "Fairground",
+      path: "/halloween/bagatelle.phtml",
+      type: "allowance",
+      uses: 20,
+      bypass: "https://www.neopets.com/halloween/process_bagatelle.phtml",
+      bypassPath: "/halloween/process_bagatelle.phtml",
+      note: "20 plays a day, 50 NP each.",
+    },
+
+    {
+      id: "snowager",
+      name: "Snowager",
+      cat: "Freebies",
+      path: "/winter/snowager.phtml",
+      type: "window",
+      windows: [[6, 7], [14, 15], [22, 23]],
+      on: true,
+    },
+    {
+      id: "deadlydice",
+      name: "Deadly Dice",
+      cat: "Gambling",
+      path: "/worlds/deadlydice.phtml",
+      type: "window",
+      windows: [[0, 1]],
+    },
+  ];
+
+  // Jellyneo picks an item image for every daily on its list, and they are all
+  // served from images.neopets.com — the same host the page is already loading
+  // art from — so the panel borrows them rather than inventing its own icon
+  // set. Paths are relative to IMG_HOST; a missing one simply leaves the row
+  // without a picture (see the onerror in renderRows).
+  //
+  // Qasalan Expellibox is the one hand-picked entry: Jellyneo's row for it
+  // links to an NC giveaway page, so the id could not be matched by URL, and
+  // its scarab is filled in here by name.
+  const IMG_HOST = "https://images.neopets.com";
+  const ICONS = {
+    springs: "items/mag_healing_striped.gif",
+    poogle: "items/toy_poogle_blue.gif",
+    mediocrity: "items/toy_action_plesio.gif",
+    meteor: "items/bd_meteor_rock.gif",
+    symol: "items/symol_brown.gif",
+    excitement: "items/toy_faerie_light.gif",
+    misfortune: "items/gar_wheelmisfortune.gif",
+    hauntedkiosk: "items/bd_sssidney_tickets.gif",
+    buriedtreasure: "items/mall_jjpb_treasurechesttrinket.gif",
+    desertkiosk: "items/scr_coltzans_cash.gif",
+    gravedanger: "items/boo_zombiehandbook.gif",
+    icekiosk: "items/toy_kiosk_plushie.gif",
+    strength: "items/gar_testyourstrength.gif",
+    expellibox: "items/bat_desert_scarab.gif",
+    illusen: "items/toy_faerie_illusen.gif",
+    jhudora: "items/toy_faerie_jhudora.gif",
+    shrine: "items/bd_desert_deathmask.gif",
+    braintree: "items/toy_brain1.gif",
+    hiddentower: "items/fyora_supreme_doll.gif",
+    magmapool: "items/bg_magma_pool.gif",
+    trudy: "items/boo_defender_mynci.gif",
+    tombola: "items/toy_squeezy_tombola.gif",
+    fruitmachine: "items/food_desert3.gif",
+    applebobbing: "items/spf_slimy_apple.gif",
+    anchor: "items/fur_pirate_anchor.gif",
+    forgottenshore: "items/bg_forgotten_shore.gif",
+    desertedtomb: "items/bd_ger_goldtalisman.gif",
+    omelette: "items/om_sausage_pepperoni1.gif",
+    jelly: "items/jel_cornupepper_whole.gif",
+    lunar: "items/fur_lunar_chart.gif",
+    neggcave: "items/gif_fony14_fg_darkmagic.gif",
+    darkcave: "items/mmat_moltite.gif",
+    quarry: "items/mmat_obsidian.gif",
+    council: "items/toy_kingaltador_figure.gif",
+    wiseking: "items/usuki_hagan.gif",
+    grumpyking: "items/toy_plushie_skarl.gif",
+    marrow: "items/marrow_veg.gif",
+    crossword: "items/fbo_library_tales.gif",
+    dailypuzzle: "events/500neopoints.gif",
+    kikopop: "items/foo_kiko_carmelpopcorn.gif",
+    grundo: "items/plu_TDMBGPOP_replica.gif",
+    caverns: "items/bg_faerie_caverns.gif",
+    bank: "items/ltoo_scorch_bank.gif",
+    questlog: "items/toy_hannah_action.gif",
+    lab: "items/labmap_09.gif",
+    petpetlab: "items/petpetlab_soot.gif",
+    coincidence: "items/rpp_reu2014_robotassispetpet.gif",
+    mystic: "items/toy_plushie_mystic.gif",
+    haiku: "items/toy_plushie_rorru.gif",
+    pickyourown: "items/4clover.gif",
+    lottery: "games/clicktoplay/icon_58.gif",
+    extravagance: "items/sta_wheel_of_extravagance.gif",
+    knowledge: "items/toy_bv_wheelofknowledge.gif",
+    monotony: "items/toy_monotony_plushie.gif",
+    starlight: "items/185mjdi5jd.gif",
+    ticketbooth: "items/ticket_mmband.gif",
+    shopofoffers: "items/mall_roamingwindslorg.gif",
+    tyrannianticket: "items/bd_tyweof2013_itsashovel.gif",
+    cocoshy: "items/spo_coconut_15.gif",
+    bagatelle: "items/gar_bagatelle.gif",
+    corkgun: "items/can_box_fruitbeans.gif",
+    snowager: "items/toy_snowager_plushie.gif",
+    deadlydice: "items/bd_vonroo_dice.gif",
+  };
+
+  const BY_ID = new Map(TRACKERS.map((t) => [t.id, t]));
+  const CATS = [...new Set(TRACKERS.map((t) => t.cat))];
+
+  // ------------------------------------------------------------------ store
+
+  function readJSON(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeJSON(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (err) {
+      console.warn(`${TAG} could not persist ${key}`, err);
+    }
+  }
+
+  let settings = (() => {
+    const stored = readJSON(SETTINGS_KEY, null);
+    if (stored) return { ...DEFAULTS, enabled: {}, alerts: {}, ...stored };
+    // First run: the default set, with alerts on for everything in it.
+    const enabled = {};
+    const alerts = {};
+    TRACKERS.forEach((t) => {
+      if (t.on) {
+        enabled[t.id] = true;
+        alerts[t.id] = true;
+      }
+    });
+    return { ...DEFAULTS, enabled, alerts };
+  })();
+
+  function saveSettings() {
+    writeJSON(SETTINGS_KEY, settings);
+  }
+
+  function isOn(id) {
+    return !!settings.enabled[id];
+  }
+
+  function alertsOn(id) {
+    return !!settings.alerts[id];
+  }
+
+  // {id: {endTime, src}} — when each tracked thing comes back, and how that
+  // was established. Window rows
+  // are not stored at all: their hours are the same for everybody and the
+  // clock alone answers them.
+  function readStates() {
+    return readJSON(STATE_KEY, {}) || {};
+  }
+
+  function writeStates(states) {
+    writeJSON(STATE_KEY, states);
+  }
+
+  // A daily is "done" until the next midnight NST; a cooldown is done until
+  // its interval is up. Window rows are pure clock and are never marked.
+  //
+  // `src` is how this was established — see SOURCE_RANK. A running timer is
+  // only overwritten by an equal or better source, so the page's own text or
+  // request wins over a stray click, and a click that lands after them does
+  // not restart the clock from scratch.
+  function markDone(id, src = "manual") {
+    const t = BY_ID.get(id);
+    if (!t) return;
+    // A plain window row has nothing to record; one with a cooldown does.
+    if (t.type === "window" && !t.cooldownMins) return;
+    const states = readStates();
+    const prev = states[id];
+    if (t.type !== "allowance" && prev && prev.endTime > Date.now()) {
+      const better = (SOURCE_RANK[src] || 0) >= (SOURCE_RANK[prev.src] || 0);
+      if (!better) return;
+    }
+    // An allowance is a tally, not a clock: each detected play spends one of
+    // the day's tries, and the stored endTime is only there to throw the
+    // tally away at midnight NST.
+    if (t.type === "allowance") {
+      const fresh = prev && prev.endTime > Date.now() ? prev : null;
+      const count = Math.min(t.uses, (fresh?.count || 0) + 1);
+      states[id] = {
+        endTime: fresh ? fresh.endTime : Date.now() + msUntilNstMidnight(),
+        count,
+        src,
+      };
+      writeStates(states);
+      console.info(`${TAG} ${id}: ${count}/${t.uses} used (${src})`);
+      return;
+    }
+    const until =
+      t.type === "daily"
+        ? msUntilNstMidnight()
+        : (t.cooldownMins || t.mins) * 60_000;
+    states[id] = { endTime: Date.now() + until, src };
+    writeStates(states);
+    console.info(`${TAG} ${id}: marked done (${src})`);
+  }
+
+  // Not "done" — "not open yet". Stored the same way so one row renders both,
+  // but it expires at the next hour rather than at midnight, and it never
+  // claims you have had your go.
+  function markRetry(id, src = "text") {
+    const states = readStates();
+    states[id] = { endTime: Date.now() + msUntilNstHour(), kind: "retry", src };
+    writeStates(states);
+    console.info(`${TAG} ${id}: not started yet, checking again next hour`);
+  }
+
+  function clearDone(id) {
+    const states = readStates();
+    delete states[id];
+    writeStates(states);
+  }
+
+  // The Healing Springs script stored its one timer under its own key; carry
+  // it over so upgrading does not lose a half hour already part-served.
+  (function migrate() {
+    const old = readJSON(LEGACY_SPRINGS_KEY, null);
+    if (!old || typeof old.endTime !== "number") return;
+    const states = readStates();
+    if (!states.springs && old.endTime > Date.now()) {
+      states.springs = { endTime: old.endTime, src: old.exact ? "text" : "click" };
+      writeStates(states);
+    }
+    try {
+      localStorage.removeItem(LEGACY_SPRINGS_KEY);
+    } catch {
+      /* private mode */
+    }
+  })();
+
+  // -------------------------------------------------------------- NST clock
+  //
+  // Neopian Standard Time is America/Los_Angeles. Everything below works from
+  // the current NST wall clock rather than from a UTC offset, so the two
+  // daylight-saving days are off by an hour for one day and correct after.
+
+  function nstParts(when = new Date()) {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const got = {};
+    for (const p of fmt.formatToParts(when)) got[p.type] = p.value;
+    const h = Number(got.hour) % 24;
+    return { h, m: Number(got.minute), s: Number(got.second) };
+  }
+
+  function nstSecondsIntoDay() {
+    const { h, m, s } = nstParts();
+    return h * 3600 + m * 60 + s;
+  }
+
+  // The marrow starts on the hour, so "not started yet" is worth exactly one
+  // wait: until the next hour turns over.
+  // Which NST day it is, as a plain key. A window typed in yesterday is not
+  // today's window, and silently keeping it would be worse than asking again.
+  function nstDateKey(when = new Date()) {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(when);
+  }
+
+  function msUntilNstHour() {
+    return (3600 - (nstSecondsIntoDay() % 3600)) * 1000;
+  }
+
+  function msUntilNstMidnight() {
+    return (86400 - nstSecondsIntoDay()) * 1000;
+  }
+
+  // A window that repeats every hour, given the minute it starts on. It is
+  // clipped at the end of the hour rather than wrapping, which is how the
+  // game behaves.
+  function hourlyWindowStatus(startMin, lengthMin) {
+    const intoHour = nstSecondsIntoDay() % 3600;
+    const from = startMin * 60;
+    const to = Math.min(from + lengthMin * 60, 3600);
+    if (intoHour >= from && intoHour < to) {
+      return { open: true, ms: (to - intoHour) * 1000 };
+    }
+    const wait = intoHour < from ? from - intoHour : 3600 - intoHour + from;
+    return { open: false, ms: wait * 1000 };
+  }
+
+  // Where the guide leaves what it read, for the panel on the other site.
+  const sharedWindowKey = (id) => `window:${id}`;
+
+  // Accepts what Jellyneo actually prints — "XX:57:00 to XX:59:59" — as well
+  // as ":57", "57:00" or plain "57", so the line can simply be pasted in.
+  // "none" records that today has no window at all, which happens.
+  function parseWindowInput(raw) {
+    const text = String(raw || "").trim().toLowerCase();
+    if (!text) return undefined; // nothing given: clear it
+    if (/^(none|no|-|n\/a)$/.test(text)) return "none";
+    // First mm:ss-looking pair wins; a bare number is the minute itself.
+    // Anything with no digits at all is rejected rather than read as zero,
+    // which is what "wat" used to come out as.
+    const pair = text.match(/(?:^|[^\d])(\d{1,2}):(\d{2})/);
+    const digits = text.replace(/[^\d]/g, "");
+    if (!pair && !digits) return undefined;
+    const minute = pair ? Number(pair[1]) : Number(digits);
+    return Number.isInteger(minute) && minute >= 0 && minute <= 59 ? minute : undefined;
+  }
+
+  // The window someone typed in for today, or null if nobody has yet (or if
+  // what they typed was for a previous day).
+  function todaysWindow(t) {
+    const today = nstDateKey();
+    // What the guide saw today wins: it came from the page that publishes it.
+    const shared = SHARED.get(sharedWindowKey(t.id));
+    if (shared && shared.day === today) {
+      if (shared.minute === "none") return "none";
+      const m = Number(shared.minute);
+      if (Number.isInteger(m) && m >= 0 && m <= 59) return m;
+    }
+    const stored = settings.hourlyWindows?.[t.id];
+    if (!stored || stored.day !== today) return null;
+    if (stored.minute === "none") return "none";
+    const minute = Number(stored.minute);
+    return Number.isInteger(minute) && minute >= 0 && minute <= 59 ? minute : null;
+  }
+
+  // For a window row: how long until it opens, or how long it stays open.
+  function windowStatus(windows) {
+    const now = nstSecondsIntoDay();
+    for (const [from, to] of windows) {
+      const a = from * 3600;
+      const b = to * 3600;
+      if (now >= a && now < b) return { open: true, ms: (b - now) * 1000 };
+    }
+    let best = Infinity;
+    for (const [from] of windows) {
+      const a = from * 3600;
+      const wait = a > now ? a - now : 86400 - now + a;
+      best = Math.min(best, wait);
+    }
+    return { open: false, ms: best * 1000 };
+  }
+
+  // ------------------------------------------------------------------- rows
+
+  // One row's current state, for both the panel and the alert check.
+  // Some dailies' own pages are Flash and have been dead for years, while the
+  // handler they used to post to still works and still pays out. Those rows
+  // can point at the handler instead; `useBypass` in the settings turns that
+  // off and sends them back to the real page.
+  const BYPASS_NOTE = "direct link \u2014 opening it plays it";
+
+  function usingBypass(t) {
+    return !!(settings.useBypass && t.bypass);
+  }
+
+  const SOURCE_LABEL = {
+    text: "read from the page",
+    request: "from the page's own request",
+    click: "from your click",
+    refused: "the page turned you away \u2014 a full wait assumed",
+    bypass: "you opened the direct link",
+    manual: "you marked it done",
+  };
+
+  function rowState(t) {
+    if (t.type === "daily") {
+      const done = readStates()[t.id];
+      if (done && done.endTime > Date.now()) {
+        if (done.kind === "retry") {
+          return {
+            ready: false,
+            ms: done.endTime - Date.now(),
+            label: "hasn't started yet \u2014 it begins on the hour",
+            kind: "daily",
+          };
+        }
+        return {
+          ready: false,
+          ms: done.endTime - Date.now(),
+          label: `done today (${SOURCE_LABEL[done.src] || "marked"}) \u2014 resets at midnight NST`,
+          kind: "daily",
+        };
+      }
+      // Not marked today, so as far as this browser knows it is waiting for
+      // you. A daily you did on another device reads as ready until you tick
+      // it off, which is the honest answer: the site does not say.
+      return {
+        ready: true,
+        ms: 0,
+        label: t.randomStart
+          ? "worth a look \u2014 it may not have started, or may be over"
+          : "not done yet today",
+        kind: "daily",
+      };
+    }
+    if (t.type === "allowance") {
+      const stored = readStates()[t.id];
+      const live = stored && stored.endTime > Date.now() ? stored : null;
+      const used = live?.count || 0;
+      if (used >= t.uses) {
+        return {
+          ready: false,
+          ms: live.endTime - Date.now(),
+          label: `all ${t.uses} used \u2014 resets at midnight NST`,
+          kind: "allowance",
+          text: formatShort(live.endTime - Date.now()),
+        };
+      }
+      return {
+        ready: true,
+        ms: 0,
+        label: `${used} of ${t.uses} used today`,
+        kind: "allowance",
+        text: `${used}/${t.uses}`,
+      };
+    }
+    if (t.type === "window" && t.hourly) {
+      const cooling = readStates()[t.id];
+      if (cooling && cooling.endTime > Date.now()) {
+        return {
+          ready: false,
+          ms: cooling.endTime - Date.now(),
+          label: "you have had your hour's try \u2014 the cooldown is exactly an hour",
+          kind: "window",
+        };
+      }
+      const minute = todaysWindow(t);
+      if (minute === "none") {
+        return {
+          ready: false,
+          ms: msUntilNstMidnight(),
+          text: "none",
+          label: "no prize window at all today \u2014 nothing to catch",
+          kind: "window",
+        };
+      }
+      if (minute === null) {
+        return {
+          ready: false,
+          ms: 0,
+          text: "set",
+          label:
+            "today's 4-minute window is not set \u2014 it changes daily, and " +
+            "Jellyneo publishes it; put the minute in the settings",
+          kind: "window",
+        };
+      }
+      const w = hourlyWindowStatus(minute, t.hourly);
+      return w.open
+        ? {
+            ready: true,
+            ms: w.ms,
+            label: `window open for ${formatShort(w.ms)} (:${String(minute).padStart(2, "0")} each hour)`,
+            kind: "window",
+          }
+        : {
+            ready: false,
+            ms: w.ms,
+            label: `until the :${String(minute).padStart(2, "0")} window`,
+            kind: "window",
+          };
+    }
+    if (t.type === "window") {
+      const w = windowStatus(t.windows);
+      return w.open
+        ? { ready: true, ms: w.ms, label: `open for ${formatShort(w.ms)}`, kind: "window" }
+        : { ready: false, ms: w.ms, label: "until it opens", kind: "window" };
+    }
+    const stored = readStates()[t.id];
+    if (!stored || stored.endTime <= Date.now()) {
+      return { ready: true, ms: 0, label: "ready", kind: "interval" };
+    }
+    return {
+      ready: false,
+      ms: stored.endTime - Date.now(),
+      label: SOURCE_LABEL[stored.src] || "marked done",
+      kind: "interval",
+    };
+  }
+
+  function activeTrackers() {
+    return TRACKERS.filter((t) => isOn(t.id));
+  }
+
+  // --------------------------------------------------------------- detection
+
+  function matchTracker() {
+    const path = location.pathname.toLowerCase();
+    // Longest path wins, so "/magma/quarry.phtml" is not shadowed by a shorter
+    // prefix somebody adds later.
+    let best = null;
+    let bestLen = 0;
+    for (const t of TRACKERS) {
+      // A handler page (process_cocoshy.phtml and friends) belongs to its
+      // activity just as much as the activity's own page does.
+      for (const candidate of [t.path, t.bypassPath]) {
+        if (!candidate || !path.startsWith(candidate)) continue;
+        if (candidate.length > bestLen) {
+          best = t;
+          bestLen = candidate.length;
+        }
+      }
+    }
+    return best;
+  }
+
+  // A page that states its outcome (Healing Springs). Everything else falls
+  // through to the click watcher below.
+  function classifyByText(t) {
+    const scope =
+      document.querySelector(".content") ||
+      document.querySelector("#content") ||
+      document.body;
+    const text = scope.innerText || "";
+    if (t.notyet && t.notyet.test(text)) return "notyet";
+    if (t.refused && t.refused.test(text)) return "refused";
+    if (t.used && t.used.test(text)) return "used";
+    return "idle";
+  }
+
+  // Clicks in the site's own furniture are not the activity.
+  const CHROME_SELECTOR = [
+    "#navtop__2020",
+    "#navbottom__2020",
+    ".nav-profile-dropdown__2020",
+    ".nav-alerts-dropdown__2020",
+    ".navsub-left__2020",
+    ".navsub-right__2020",
+    ".footer__2020",
+    ".premium-widget__2024",
+    "#nphs",
+    "#nptm",
+    "#nptm-settings",
+  ].join(",");
+
+  // Requests the site fires by itself on every page: the nav's notification
+  // poll, the Quest Log pane refreshing when its dropdown opens or closes, the
+  // beta-popup opt-out check, bookmarking. None of them is you doing a daily,
+  // and the Quest Log ones would otherwise tick Quest Log off the moment you
+  // opened /questlog/.
+  const NOISE_RE = new RegExp(
+    [
+      "/np-templates/ajax/notifications\\.php",
+      "/np-templates/ajax/questlog/(retrievePaneQuests|updateQuestPane|muteAlerts)\\.php",
+      "/np-templates/ajax/optout-beta-popup\\.php",
+      "/np-templates/ajax/safetydeposit/",
+      "/bookmark_me\\.phtml",
+      "pin-status",
+      "/premium/settings/dailies/",
+    ].join("|"),
+    "i",
+  );
+
+  // Anything the page loads while it is still assembling itself is the page,
+  // not you. Nothing you can click happens this fast.
+  const BOOTSTRAP_MS = 1500;
+
+  // How a visit was established, worst to best. A better source may overwrite
+  // a worse one for the same activity; the reverse is ignored, so a stray
+  // click cannot downgrade a reading taken from the page's own text.
+  const SOURCE_RANK = { refused: 1, click: 1, request: 2, bypass: 3, text: 3, manual: 4 };
+
+  // A link that performs the action rather than just navigating: it carries a
+  // query string, or it is a javascript:/# control. A plain link to another
+  // page is somebody leaving, and leaving is not doing.
+  function isActionLink(el, t) {
+    const href = el.getAttribute("href") || "";
+    if (!href || href.startsWith("#") || href.toLowerCase().startsWith("javascript:")) {
+      return true;
+    }
+    let url;
+    try {
+      url = new URL(href, location.href);
+    } catch {
+      return false;
+    }
+    if (url.origin !== location.origin) return false;
+    if (!url.pathname.toLowerCase().startsWith(t.path)) return false;
+    return !!url.search;
+  }
+
+  // Does this element look like the activity's own control? Only asked of
+  // trackers that name one (`action`), and matched against the text, value
+  // and href — "Heal my Pets!" is a submit's value, not its text.
+  function isActionControl(el, t) {
+    if (!t.action) return true;
+    const label = [
+      el.innerText || "",
+      el.value || "",
+      el.getAttribute("href") || "",
+      el.getAttribute("name") || "",
+      el.getAttribute("alt") || "",
+    ].join(" ");
+    return t.action.test(label);
+  }
+
+  function watchForVisit(t) {
+    if (t.type === "window" && !t.cooldownMins) return;
+
+    // Jumping in outside the prize window does not start a cooldown, and the
+    // page says the same thing either way — so neither does this. Asked at
+    // the moment of the attempt, not at page load: the window may be set (or
+    // may open) while the page sits there.
+    const insideWindow = () => {
+      if (!t.hourly) return true;
+      const minute = todaysWindow(t);
+      if (minute === null || minute === "none") return false;
+      return hourlyWindowStatus(minute, t.hourly).open;
+    };
+    const mark = (src) => {
+      if (insideWindow()) markDone(t.id, src);
+    };
+    const loadedAt = Date.now();
+    // For a tracker with a named control, a request only counts as the action
+    // if that control was clicked just before it — otherwise an unrelated
+    // background call on the page would stand in for the deed.
+    let controlClickedAt = 0;
+
+    // Arriving on the handler page means it has already run — the payout is
+    // in the response you are looking at — so this is the action, not a
+    // guess at one, however you got here.
+    if (t.bypassPath && location.pathname.toLowerCase().startsWith(t.bypassPath)) {
+      markDone(t.id, "bypass");
+      return;
+    }
+
+
+    // 1. The page says so. Only Healing Springs does today, but this is the
+    //    only source that is actually evidence rather than inference.
+    if (t.used || t.refused || t.notyet) {
+      const verdict = classifyByText(t);
+      if (verdict === "notyet") {
+        // The page has told us the thing is not open. Nothing you do on it
+        // this page-load is a go, so the request and click watchers below are
+        // skipped entirely rather than left to misread a click.
+        markRetry(t.id, "text");
+        return;
+      }
+      if (verdict === "used") {
+        mark("text");
+      } else if (verdict === "refused") {
+        const stored = readStates()[t.id];
+        // A refusal says a cooldown is running but not how much is left, so a
+        // timer already stored is better information than a fresh guess.
+        if (!stored || stored.endTime <= Date.now()) mark("refused");
+      }
+    }
+
+    // 2. The site's own request. Most of H5 does its dailies over AJAX —
+    //    collecting bank interest POSTs to process_bank.php, the quest and
+    //    wheel pages post to their own endpoints — so a same-origin POST from
+    //    this page, or an AJAX GET, is the action itself rather than a guess
+    //    about one. Patched on the page's window (this script runs with
+    //    @grant none, in the page's own context), restored on pagehide, and
+    //    only ever reading the method and URL: the request goes through
+    //    untouched, and nothing is ever sent by this script.
+    const seen = (url, method) => {
+      if (Date.now() - loadedAt < BOOTSTRAP_MS) return;
+      let u;
+      try {
+        u = new URL(url, location.href);
+      } catch {
+        return;
+      }
+      if (u.origin !== location.origin) return; // analytics, ads, images
+      if (NOISE_RE.test(u.pathname + u.search)) return;
+      if (t.action && Date.now() - controlClickedAt > 10_000) return;
+      const post = (method || "GET").toUpperCase() !== "GET";
+      const ajax = /\/np-templates\/ajax\//i.test(u.pathname) || /\.php$/i.test(u.pathname);
+      if (!post && !ajax) return;
+      mark("request");
+    };
+
+    const realFetch = pageWindow.fetch;
+    if (typeof realFetch === "function") {
+      try {
+        pageWindow.fetch = function (input, init) {
+        try {
+          const url = typeof input === "string" ? input : input?.url;
+          seen(url, init?.method || input?.method);
+        } catch {
+          /* never let the watcher break the page's own request */
+        }
+          return realFetch.apply(this, arguments);
+        };
+      } catch (err) {
+        // Some managers hand out a read-only view of the page's window.
+        console.warn(`${TAG} cannot watch this page's requests`, err);
+      }
+    }
+
+    const realOpen = pageWindow.XMLHttpRequest?.prototype?.open;
+    if (typeof realOpen === "function") {
+      try {
+        pageWindow.XMLHttpRequest.prototype.open = function (method, url) {
+          try {
+            seen(url, method);
+          } catch {
+            /* as above */
+          }
+          return realOpen.apply(this, arguments);
+        };
+      } catch (err) {
+        console.warn(`${TAG} cannot watch this page's XHRs`, err);
+      }
+    }
+
+    window.addEventListener("pagehide", () => {
+      try {
+        if (typeof realFetch === "function") pageWindow.fetch = realFetch;
+        if (typeof realOpen === "function") {
+          pageWindow.XMLHttpRequest.prototype.open = realOpen;
+        }
+      } catch {
+        /* nothing to undo if the patch never took */
+      }
+    });
+
+    // 3. A form submitted to this page, which is how the classic pages act.
+    document.addEventListener(
+      "submit",
+      (e) => {
+        const form = e.target;
+        if (!form || form.closest?.(CHROME_SELECTOR)) return;
+        // With a named control, the form has to be the one carrying it.
+        if (t.action) {
+          const controls = [
+            ...form.querySelectorAll("button, input[type=submit], input[type=image]"),
+          ];
+          if (!controls.some((c) => isActionControl(c, t))) return;
+        }
+        controlClickedAt = Date.now();
+        mark("request");
+      },
+      { capture: true },
+    );
+
+    // 4. Last resort: a click on something that looks like the control. Only
+    //    buttons and action links count — a plain link to another page used to
+    //    count too, which meant leaving the Shrine marked you as having used
+    //    it. Still the weakest source, and still labelled as such in the panel.
+    document.addEventListener(
+      "click",
+      (e) => {
+        const el = e.target?.closest?.(
+          "a[href], button, input[type=submit], input[type=image]",
+        );
+        if (!el || el.closest(CHROME_SELECTOR)) return;
+        if (el.tagName === "A" && !isActionLink(el, t)) return;
+        if (!isActionControl(el, t)) return;
+        controlClickedAt = Date.now();
+        mark("click");
+      },
+      { capture: true },
+    );
+  }
+
+  // ------------------------------------------------------------------ alerts
+
+  function fireNotification(names) {
+    if (!settings.notify || typeof Notification === "undefined") return;
+    if (Notification.permission !== "granted") return;
+    const title = names.length === 1 ? `${names[0]} is ready` : `${names.length} dailies are ready`;
+    try {
+      const n = new Notification(title, {
+        body: names.join(", "),
+        tag: "np-timers",
+      });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
+    } catch (err) {
+      console.warn(`${TAG} notification failed`, err);
+    }
+  }
+
+  function fireBeep() {
+    if (!settings.beep) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    try {
+      const ctx = new Ctx();
+      const gain = ctx.createGain();
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.value = settings.beepGain;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+      osc.stop(ctx.currentTime + 0.55);
+      osc.onended = () => ctx.close();
+    } catch (err) {
+      console.warn(`${TAG} beep failed`, err);
+    }
+  }
+
+  let titleFlasher = null;
+  const realTitle = document.title;
+
+  function startTitleFlash(count) {
+    if (!settings.flashTitle) return;
+    stopTitleFlash();
+    let on = false;
+    titleFlasher = setInterval(() => {
+      on = !on;
+      document.title = on ? `✨ ${count} ready!` : realTitle;
+    }, 1500);
+  }
+
+  function stopTitleFlash() {
+    if (!titleFlasher) return;
+    clearInterval(titleFlasher);
+    titleFlasher = null;
+    document.title = realTitle;
+  }
+
+  // Both notifications and audio need a user gesture, and the settings
+  // checkboxes are one — which is why the panel no longer carries a button
+  // whose only job was to be clicked.
+  function requestNotifyPermission() {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission !== "default") return;
+    Notification.requestPermission()
+      .then(render)
+      .catch((err) => console.warn(`${TAG} permission request failed`, err));
+  }
+
+  function notifyPermissionText() {
+    if (typeof Notification === "undefined") return "not supported in this browser";
+    if (Notification.permission === "denied") return "blocked for this site";
+    if (Notification.permission === "granted") return "allowed";
+    return "your browser will ask";
+  }
+
+  // ------------------------------------------------------------------ styles
+
+  const FONT_HOST = "https://images.neopets.com/js/fonts";
+  const CAFETERIA = '"NPTM Cafeteria", "Cafeteria", "Arial Bold", sans-serif';
+  const MUSEO = '"NPTM Museo", "Museo Sans Rounded", Verdana, sans-serif';
+
+  // Same fonts and the same yellow button as the Safety Deposit Box's
+  // "Remove 1" (template.css .button-default__2020 + .button-yellow__2020 plus
+  // safetydeposit.css .sdb-remove1), copied declaration for declaration. The
+  // font files come from images.neopets.com, which serves them with
+  // `access-control-allow-origin: *`.
+  const CSS = `
+    @font-face {
+      font-family: "NPTM Cafeteria"; font-display: swap;
+      src: url("${FONT_HOST}/cafeteria-black.ttf") format("truetype");
+    }
+    @font-face {
+      font-family: "NPTM Museo"; font-style: normal; font-display: swap;
+      src: url("${FONT_HOST}/museosansrounded-500.woff") format("woff"),
+           url("${FONT_HOST}/museosansrounded-500.ttf") format("truetype");
+    }
+    #nptm, #nptm-settings, #nptm-shade {
+      box-sizing: border-box !important;
+      font: 12px/1.45 ${MUSEO} !important; color: #333 !important;
+    }
+    #nptm *, #nptm-settings * { box-sizing: border-box !important; }
+    #nptm {
+      position: fixed !important; z-index: 2147483646 !important;
+      /* Narrow on purpose. The site's content column is 1000px and centred,
+         so on a 1280px window there are 140px of margin each side: at this
+         width the panel lives in that margin instead of lying over the page.
+         Wider windows give it more room; narrower ones have none to give, and
+         the corner can be moved in the settings. */
+      width: 150px !important; text-align: left !important;
+      border: 1px solid #27486d !important; border-radius: 10px !important;
+      overflow: hidden !important; background: #fff !important;
+      box-shadow: 0 2px 7px rgba(0,0,0,0.3) !important;
+    }
+    #nptm-head {
+      display: flex !important; align-items: center !important;
+      gap: 6px !important; padding: 4px 8px !important;
+      background: linear-gradient(#5b9bd9, #2367B5) !important;
+      border-bottom: 1px solid #27486d !important;
+      color: #fff !important; font: 13pt/1.1 ${CAFETERIA} !important;
+      cursor: pointer !important; user-select: none !important;
+    }
+    #nptm-title { flex: 1 1 auto !important; white-space: nowrap !important; }
+    /* Collapsed, the head is the whole widget, so whatever it shows has to
+       occupy the same space from second to second: fixed width, monospace,
+       tabular figures. Otherwise 59:59 → 1:00:00 would make the pill jump,
+       which is the one thing a collapsed panel should never do. */
+    #nptm-mini {
+      display: none !important; min-width: 54px !important;
+      text-align: right !important;
+      font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas,
+            "DejaVu Sans Mono", monospace !important;
+      font-variant-numeric: tabular-nums !important;
+      font-feature-settings: "tnum" 1 !important;
+    }
+    /* The gear is drawn here rather than pulled from an icon font: one more
+       stylesheet on every Neopets page, for one glyph, is a poor trade, and
+       a drawn path cannot 404 or arrive late. */
+    #nptm-gear {
+      flex: none !important; display: flex !important; align-items: center !important;
+      opacity: 0.85 !important; cursor: pointer !important;
+      color: #fff !important; transition: opacity 0.12s ease, transform 0.25s ease !important;
+    }
+    #nptm-gear:hover { opacity: 1 !important; transform: rotate(45deg) !important; }
+    #nptm-gear svg { display: block !important; }
+    #nptm-body {
+      background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
+      padding: 4px 0 !important;
+      max-height: 420px !important; overflow-y: auto !important;
+      border-radius: 0 0 9px 9px !important;
+    }
+    /* Two lines per row — the name across the top, the clock under it. One
+       line needs ~230px before the names stop fitting, and that width lies
+       over the page; stacking buys the narrow panel at the cost of height,
+       which the margin has plenty of. */
+    .nptm-row {
+      position: relative !important; cursor: pointer !important;
+      display: grid !important;
+      grid-template-columns: minmax(0, 1fr) !important;
+      grid-template-areas: "link" "time" !important;
+      align-items: center !important;
+      gap: 0 !important; padding: 3px 7px 4px !important;
+    }
+    .nptm-link {
+      grid-area: link !important; display: flex !important;
+      align-items: center !important; gap: 5px !important;
+      min-width: 0 !important; text-decoration: none !important;
+    }
+    .nptm-ico {
+      flex: none !important; width: 14px !important; height: 14px !important;
+      object-fit: contain !important; image-rendering: auto !important;
+    }
+    .nptm-row + .nptm-row { border-top: 1px solid #dce8f6 !important; }
+    .nptm-name {
+      min-width: 0 !important;
+      overflow: hidden !important; text-overflow: ellipsis !important;
+      white-space: nowrap !important; color: #1b4f85 !important;
+      cursor: pointer !important; text-decoration: none !important;
+      font: 10.5px/1.4 ${MUSEO} !important;
+    }
+    .nptm-link:hover .nptm-name { text-decoration: underline !important; }
+    /* Monospace with tabular figures, so a ticking second changes the digit
+       and nothing else: proportional digits reflow the row every tick, which
+       is what made the countdown jump about. min-width holds the column
+       steady as rows move between m:ss and h:mm:ss. */
+    /* The clock sits hard against the right-hand edge of its line, under the
+       name. The hover ✓ lives at the far left of that line, which is empty
+       anyway, so nothing has to be reserved here — the digits and the control
+       never come near each other. (Icons-only is the exception: there the row
+       is one line and the control does sit between the icon and the clock,
+       which is why it keeps a left reserve of its own below.) */
+    .nptm-time {
+      grid-area: time !important; min-width: 46px !important;
+      text-align: right !important;
+      padding: 0 2px 0 0 !important;
+      font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas,
+            "DejaVu Sans Mono", monospace !important;
+      font-variant-numeric: tabular-nums !important;
+      font-feature-settings: "tnum" 1 !important;
+      letter-spacing: 0 !important; color: #1b4f85 !important;
+    }
+    /* Out of the layout entirely: laid over the row's bottom-right corner,
+       invisible until the row is hovered. It is a control you want a few
+       times a week, so it should not cost a column on every row forever —
+       and with it gone, a window row (which has nothing to mark) needs no
+       spacer to keep its clock in line. */
+    .nptm-mark {
+      position: absolute !important; left: 7px !important; bottom: 4px !important;
+      width: 13px !important; height: 13px !important;
+      display: flex !important; align-items: center !important;
+      justify-content: center !important;
+      cursor: pointer !important; color: #7b8aa0 !important;
+      background: none !important; border: 0 !important; padding: 0 !important;
+      opacity: 0 !important; transition: opacity 0.12s ease !important;
+    }
+    .nptm-mark svg { display: block !important; }
+    .nptm-row.is-ready .nptm-mark { color: #4e8f6d !important; }
+    .nptm-row:hover .nptm-mark,
+    .nptm-mark:focus,
+    .nptm-mark:focus-visible { opacity: 1 !important; }
+    .nptm-mark:hover { color: #1b4f85 !important; }
+    /* Nothing hovers on a touch screen, so there it stays faintly visible
+       rather than being unreachable. */
+    @media (hover: none) {
+      .nptm-mark { opacity: 0.55 !important; }
+    }
+    .nptm-row.is-ready .nptm-name,
+    .nptm-row.is-ready .nptm-time { color: #156141 !important; }
+    .nptm-row.is-ready { background: #e9f8ef !important; }
+    #nptm-empty {
+      padding: 8px 9px !important; color: #4a5a6a !important;
+      font: 11px/1.4 ${MUSEO} !important;
+    }
+    .nptm-btn {
+      display: block !important; width: 100% !important; margin: 0 !important;
+      padding: 3px 10px 7px !important; cursor: pointer !important;
+      position: relative !important; overflow: hidden !important;
+      outline: none !important; text-align: center !important;
+      font: 11pt/1.1 ${CAFETERIA} !important; white-space: nowrap !important;
+      color: #363636 !important;
+      background: linear-gradient(#f6e250, #ebb233) !important;
+      border: #fff solid 1px !important; border-radius: 15px !important;
+      box-shadow: inset 0 0 0 1px rgba(246,226,80,1),
+                  inset 0 -3px 2px 3px rgba(196,124,25,1),
+                  inset 0 2px 0 1px rgba(253,249,220,1),
+                  0 0 0 2px rgba(0,0,0,1) !important;
+    }
+    .nptm-btn:hover, .nptm-btn:focus {
+      background: linear-gradient(#ffff54, #ffd328) !important;
+      box-shadow: inset 0 0 0 1px rgba(255,255,84,1),
+                  inset 0 -3px 2px 3px rgba(234,143,9,1),
+                  inset 0 2px 0 1px rgba(255,255,243,1),
+                  0 0 0 2px rgba(0,0,0,1) !important;
+    }
+    .nptm-btn:active {
+      background: linear-gradient(#ebb233, #f6e250) !important;
+      box-shadow: inset 0 0 0 1px rgba(235,178,51,1),
+                  inset 0 -1px 2px 3px rgba(196,124,25,1),
+                  inset 0 2px 0 1px rgba(253,249,220,1),
+                  0 0 0 2px rgba(0,0,0,1) !important;
+    }
+    .nptm-btn--sm { width: auto !important; font-size: 9pt !important; padding: 2px 10px 5px !important; }
+    /* Icons-only. One line per row, the icon doing the naming, which takes
+       the panel from 150px down to 104 — narrow enough to keep clear of the
+       page on a laptop screen. The full name stays in the row's tooltip, and
+       the icon is the link, so there is no smaller target to hit. */
+    /* One line has to hold the icon, a clear gap on either side of the ✓,
+       and up to h:mm:ss of digits — 126px is what that adds up to. (104 ran
+       the longest clocks into the tick; 118 left them touching it.) */
+    #nptm[data-compact="1"] { width: 126px !important; }
+    #nptm[data-compact="1"] .nptm-time { padding-left: 22px !important; }
+    #nptm[data-compact="1"] .nptm-row {
+      grid-template-columns: auto minmax(0, 1fr) !important;
+      grid-template-areas: "link time" !important;
+      padding: 2px 7px 3px !important;
+    }
+    #nptm[data-compact="1"] .nptm-name { display: none !important; }
+    #nptm[data-compact="1"] .nptm-ico {
+      width: 22px !important; height: 22px !important;
+    }
+    #nptm[data-compact="1"] .nptm-link:hover .nptm-ico {
+      filter: brightness(1.12) saturate(1.25) !important;
+    }
+    /* One line to sit against now, so the tick centres — and it sits in the
+       gap between the icon and the clock rather than past the clock. */
+    #nptm[data-compact="1"] .nptm-mark {
+      /* 38 rather than 33: at 33 the tick sat 4px from the icon and read as
+         part of it. This leaves a clear gap on both sides, and the clock's
+         22px of left padding keeps the digits off its other flank. */
+      left: 38px !important; bottom: 50% !important;
+      transform: translateY(50%) !important;
+    }
+
+    #nptm[data-any-ready="1"] #nptm-head {
+      background: linear-gradient(#2fa86f, #1d774f) !important;
+      border-bottom-color: #14543a !important;
+    }
+    #nptm[data-collapsed="1"] #nptm-body { display: none !important; }
+    #nptm[data-collapsed="1"] { width: auto !important; }
+    #nptm[data-collapsed="1"] #nptm-head { padding: 4px 7px !important; }
+    #nptm[data-collapsed="1"] #nptm-title { display: none !important; }
+    #nptm[data-collapsed="1"] #nptm-mini { display: inline !important; }
+
+    /* ---- settings page ---- */
+    #nptm-shade {
+      position: fixed !important; inset: 0 !important;
+      background: rgba(0,0,0,0.45) !important; z-index: 2147483646 !important;
+    }
+    #nptm-settings {
+      position: fixed !important; z-index: 2147483647 !important;
+      top: 50% !important; left: 50% !important;
+      transform: translate(-50%, -50%) !important;
+      width: min(560px, 94vw) !important; max-height: 86vh !important;
+      display: flex !important; flex-direction: column !important;
+      background: #fff !important; border: 1px solid #27486d !important;
+      border-radius: 10px !important; overflow: hidden !important;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45) !important;
+    }
+    #nptm-settings header {
+      display: flex !important; align-items: center !important;
+      padding: 7px 12px !important; color: #fff !important;
+      background: linear-gradient(#5b9bd9, #2367B5) !important;
+      font: 18pt/1.15 ${CAFETERIA} !important;
+    }
+    #nptm-settings header span { flex: 1 1 auto !important; }
+    #nptm-close {
+      display: flex !important; align-items: center !important;
+      cursor: pointer !important; padding: 2px !important;
+      background: none !important; border: 0 !important; color: #fff !important;
+      opacity: 0.85 !important; transition: opacity 0.12s ease !important;
+    }
+    #nptm-close:hover { opacity: 1 !important; }
+    #nptm-close svg { display: block !important; }
+    #nptm-settings .nptm-scroll {
+      overflow-y: auto !important; padding: 10px 12px !important;
+      background: #f6f9fd !important;
+    }
+    #nptm-settings h4 {
+      margin: 12px 0 4px !important; padding: 0 !important;
+      font: 14pt/1.2 ${CAFETERIA} !important; color: #1b4f85 !important;
+      border-bottom: 1px solid #cfe0f2 !important;
+    }
+    #nptm-settings h4:first-child { margin-top: 0 !important; }
+    .nptm-opt {
+      display: flex !important; align-items: center !important; gap: 8px !important;
+      padding: 3px 2px !important; font: 12px/1.4 ${MUSEO} !important;
+    }
+    .nptm-opt .nptm-ico { margin-right: -2px !important; }
+    .nptm-opt input[type=checkbox] {
+      width: 14px !important; height: 14px !important; margin: 0 !important; flex: none !important;
+    }
+    .nptm-opt .nptm-opt-name { flex: 1 1 auto !important; color: #22303f !important; }
+    .nptm-opt .nptm-opt-when { color: #6a7a8c !important; font-size: 11px !important; }
+    #nptm-settings .nptm-guide {
+      flex: none !important; color: #2367B5 !important;
+      font: 11px/1.4 ${MUSEO} !important; text-decoration: underline !important;
+      white-space: nowrap !important;
+    }
+    #nptm-settings .nptm-min {
+      width: 58px !important; flex: none !important;
+      font: 12px/1.3 ${MUSEO} !important; text-align: center !important;
+      border: 1px solid #b7c9dd !important; border-radius: 5px !important;
+      padding: 2px 4px !important; background: #fff !important; color: #22303f !important;
+    }
+    .nptm-bell {
+      flex: none !important; cursor: pointer !important; background: none !important;
+      border: 0 !important; padding: 0 2px !important; font-size: 12px !important;
+      opacity: 0.3 !important;
+    }
+    .nptm-bell.is-on { opacity: 1 !important; }
+    #nptm-settings footer {
+      display: flex !important; gap: 8px !important; justify-content: flex-end !important;
+      padding: 9px 12px !important; background: #eaf2fb !important;
+      border-top: 1px solid #cfe0f2 !important;
+    }
+  `;
+
+  function injectStyle() {
+    if (document.getElementById("nptm-style")) return;
+    const style = document.createElement("style");
+    style.id = "nptm-style";
+    style.textContent = CSS;
+    document.head.appendChild(style);
+  }
+
+  // ------------------------------------------------------------- guide mode
+  //
+  // The script also runs on the guide that publishes the Symol Hole's daily
+  // window, where it does one thing: read today's window off the page and
+  // hang it on that page's own links back to Neopets, as a fragment the
+  // Neopets side picks up on arrival. Click through from the guide and the
+  // window comes with you — nothing is typed, and nothing is fetched behind
+  // your back, because the only page read is the one you opened yourself.
+  //
+  // A fragment rather than a query string: it never reaches a server, not
+  // Neopets' and not anyone else's. It carries a number from 0 to 59, which
+  // the other side validates before storing; the worst a forged link can do
+  // is show you the wrong four minutes.
+
+  const GUIDE_HOSTS = /(^|\.)jellyneo\.net$/i;
+  const HASH_PREFIX = "nptm-window-";
+
+  function guideMode() {
+    const text = document.body?.innerText || "";
+    for (const t of TRACKERS.filter((x) => x.guide && x.guideWindow)) {
+      // The guide's own address, loosely: its path, and every query
+      // parameter it names present with the same value. Loose rather than
+      // exact so a tracking parameter or a different order still matches the
+      // page a reader is actually on.
+      const guideUrl = new URL(t.guide);
+      if (!location.pathname.startsWith(guideUrl.pathname)) continue;
+      const here = new URLSearchParams(location.search);
+      let sameQuery = true;
+      for (const [k, v] of guideUrl.searchParams) {
+        if (here.get(k) !== v) sameQuery = false;
+      }
+      if (!sameQuery) continue;
+
+      // Is this today's page? The guide stamps a date on the window, and a
+      // cached or bookmarked copy of yesterday's would otherwise be read as
+      // gospel.
+      let fresh = true;
+      const dated = t.guideDate && text.match(t.guideDate);
+      if (dated) {
+        const onPage = new Date(`${dated[1]} ${dated[2]}, ${new Date().getFullYear()}`);
+        const todayNst = nstDateKey();
+        const pageKey = Number.isNaN(onPage.getTime())
+          ? null
+          : `${onPage.getFullYear()}-${String(onPage.getMonth() + 1).padStart(2, "0")}-${String(onPage.getDate()).padStart(2, "0")}`;
+        fresh = pageKey === todayNst;
+      }
+
+      const found = text.match(t.guideWindow);
+      const none = t.guideNone && t.guideNone.test(text);
+      const value = found ? String(Number(found[1])) : none ? "none" : null;
+      if (!value || !fresh) {
+        if (!fresh) console.info(`${TAG} guide page is not today's; left alone`);
+        continue;
+      }
+
+      // The point of running here: the window is recorded as soon as the
+      // page is open, with no click. The decorated links below are the
+      // fallback for a manager that gives no shared storage.
+      SHARED.set(sharedWindowKey(t.id), { minute: value, day: nstDateKey() });
+
+      let decorated = 0;
+      for (const link of document.querySelectorAll('a[href*="neopets.com"]')) {
+        const href = link.getAttribute("href") || "";
+        if (!href.toLowerCase().includes(t.path)) continue;
+        link.href = `${href.split("#")[0]}#${HASH_PREFIX}${t.id}=${value}`;
+        decorated++;
+      }
+      console.info(
+        `${TAG} guide: ${t.name} window ${value}` +
+          (SHARED.ok ? " saved for the panel" : "") +
+          `; ${decorated} link(s) carry it too`,
+      );
+      showGuideBadge(t, value, decorated);
+    }
+  }
+
+  // A line on the guide saying what will travel, so this is visible rather
+  // than a surprise on the other end.
+  function showGuideBadge(t, value, decorated) {
+    if (!decorated && !SHARED.ok) return;
+    if (document.getElementById("nptm-guide-badge")) return;
+    const anchor = [...document.querySelectorAll("p, h3, span")].find((el) =>
+      t.guideWindow.test(el.textContent || ""),
+    );
+    if (!anchor) return;
+    const badge = document.createElement("div");
+    badge.id = "nptm-guide-badge";
+    badge.style.cssText =
+      "margin:8px auto;padding:5px 9px;max-width:420px;border-radius:7px;" +
+      "border:1px solid #27486d;background:#eaf2fb;color:#1b4f85;" +
+      "font:12px/1.4 Verdana,sans-serif;text-align:center;";
+    const known =
+      value === "none"
+        ? "no window today"
+        : `today's :${String(value).padStart(2, "0")} window`;
+    badge.textContent = SHARED.ok
+      ? `Dailies panel: ${known} \u2014 noted, nothing else to do.`
+      : `Dailies panel: open the ${t.name} from this page and ${known} comes with you.`;
+    anchor.insertAdjacentElement("afterend", badge);
+  }
+
+  // The other half, on Neopets: take the window off the fragment, keep it for
+  // today, and tidy the address bar.
+  function consumeWindowHash() {
+    const m = location.hash.match(new RegExp(`${HASH_PREFIX}([a-z0-9]+)=([a-z0-9]+)`, "i"));
+    if (!m) return;
+    const t = BY_ID.get(m[1]);
+    if (!t || !t.hourly) return;
+    const raw = m[2].toLowerCase();
+    const value = raw === "none" ? "none" : Number(raw);
+    if (value !== "none" && !(Number.isInteger(value) && value >= 0 && value <= 59)) {
+      return;
+    }
+    settings.hourlyWindows = settings.hourlyWindows || {};
+    settings.hourlyWindows[t.id] = { minute: value, day: nstDateKey() };
+    saveSettings();
+    console.info(`${TAG} ${t.id}: window ${value} taken from the guide link`);
+    try {
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch {
+      /* some pages block it; the fragment is harmless either way */
+    }
+  }
+
+  // ------------------------------------------------------------------- panel
+
+  // An eight-tooth gear, hole punched by the even-odd rule: the first
+  // subpath is the hub, the second the body.
+  const GEAR_SVG =
+    '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">' +
+    '<path fill="currentColor" fill-rule="evenodd" d="' +
+    "M8 10.1a2.1 2.1 0 1 1 0-4.2 2.1 2.1 0 0 1 0 4.2z" +
+    "M14 8.75V7.25l-1.73-.29a4.5 4.5 0 0 0-.5-1.2l1.02-1.43-1.12-1.12-1.43 1.02" +
+    "a4.5 4.5 0 0 0-1.2-.5L8.75 2h-1.5l-.29 1.73a4.5 4.5 0 0 0-1.2.5L4.33 3.21" +
+    "L3.21 4.33l1.02 1.43a4.5 4.5 0 0 0-.5 1.2L2 7.25v1.5l1.73.29c.1.42.27.82.5 1.2" +
+    "l-1.02 1.43 1.12 1.12 1.43-1.02c.38.23.78.4 1.2.5L7.25 14h1.5l.29-1.73" +
+    "c.42-.1.82-.27 1.2-.5l1.43 1.02 1.12-1.12-1.02-1.43c.23-.38.4-.78.5-1.2L14 8.75z" +
+    '"/></svg>';
+
+  // Stroked rather than typographic: ✓ and ✕ render at wildly different
+  // weights and baselines across fonts, and at 11px that is the difference
+  // between a control and a smudge.
+  const stroke = (d, size, width) =>
+    `<svg width="${size}" height="${size}" viewBox="0 0 16 16" aria-hidden="true">` +
+    `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${width}"` +
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  const CHECK_SVG = stroke("M3.2 8.6 6.3 11.7 12.8 4.6", 11, 2.2);
+  const CROSS_SVG = stroke("M4.4 4.4 11.6 11.6M11.6 4.4 4.4 11.6", 11, 2.2);
+  const CLOSE_SVG = stroke("M4 4 12 12M12 4 4 12", 14, 2);
+
+  let panel = null;
+  let body = null;
+  let mini = null;
+  let ticker = null;
+  let lastReady = new Set();
+
+  // One <img> per row, or nothing at all if the art has moved: a broken image
+  // icon in a 16px slot looks worse than a blank one.
+  function iconFor(t) {
+    const img = document.createElement("img");
+    img.className = "nptm-ico";
+    img.alt = "";
+    img.loading = "lazy";
+    img.src = `${IMG_HOST}/${ICONS[t.id] || ""}`;
+    img.addEventListener("error", () => img.remove());
+    return img;
+  }
+
+  function formatShort(ms) {
+    const total = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  }
+
+  function buildPanel() {
+    injectStyle();
+    const [vertical, horizontal] = settings.corner.split("-");
+    panel = document.createElement("div");
+    panel.id = "nptm";
+    // Far enough from the corner that it reads as sitting on the page rather
+    // than wedged into the window's edge.
+    panel.style.setProperty(vertical, "20px", "important");
+    panel.style.setProperty(horizontal, "18px", "important");
+    panel.dataset.collapsed = settings.collapsed ? "1" : "0";
+    panel.dataset.compact = settings.compact ? "1" : "0";
+
+    // No icon and a short word: at 104px the icons-only panel has barely
+    // enough head room for the title and the gear.
+    const head = document.createElement("div");
+    head.id = "nptm-head";
+
+    const title = document.createElement("span");
+    title.id = "nptm-title";
+    title.textContent = "Dailies";
+    head.appendChild(title);
+
+    mini = document.createElement("span");
+    mini.id = "nptm-mini";
+    head.appendChild(mini);
+
+    const gear = document.createElement("span");
+    gear.id = "nptm-gear";
+    gear.innerHTML = GEAR_SVG;
+    gear.title = "Settings";
+    gear.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSettings();
+    });
+    head.appendChild(gear);
+
+    head.addEventListener("click", () => {
+      settings.collapsed = panel.dataset.collapsed !== "1";
+      panel.dataset.collapsed = settings.collapsed ? "1" : "0";
+      saveSettings();
+      render();
+    });
+    panel.appendChild(head);
+
+    body = document.createElement("div");
+    body.id = "nptm-body";
+    panel.appendChild(body);
+
+    document.body.appendChild(panel);
+  }
+
+  // The rows are built once and then updated in place, once a second. They
+  // used to be thrown away and rebuilt on every tick, which worked but made
+  // the hover ✓ flash: a freshly created button starts at opacity 0 with a
+  // fade, so under the cursor it blinked back in every second. Only a change
+  // in which rows there are, what order they are in, or whether one is ready
+  // (the ✓/✕ swap) rebuilds the list now; the ticking clock is a text write.
+  let rowCache = new Map();
+  let rowsKey = "";
+
+  function rowsSignature(rows) {
+    return (
+      (settings.compact ? "c" : "n") +
+      (settings.newTab ? "t" : "-") +
+      (settings.useBypass ? "b" : "-") +
+      "|" +
+      rows
+        .map(
+          ({ t, st }) =>
+            `${t.id}${st.ready ? "+" : "-"}${needsGuideFirst(t) ? "?" : ""}`,
+        )
+        .join(",")
+    );
+  }
+
+  function markTitle(t, st) {
+    if (t.type === "allowance") {
+      return st.ready ? `Count one more \u2014 ${t.uses} a day` : "Reset today's tally";
+    }
+    return st.ready
+      ? "I just did this \u2014 start the timer"
+      : "Not done after all \u2014 clear this timer";
+  }
+
+  function timeText(st) {
+    if (st.text) return st.text;
+    if (st.kind === "window" && st.ready) return "Open";
+    return st.ready ? "Ready" : formatShort(st.ms);
+  }
+
+  // A Symol Hole row with no window set yet sends you to the guide instead
+  // of the hole: the hole is no use until you know the four minutes, and
+  // arriving via the guide's own link sets them on the way through.
+  function needsGuideFirst(t) {
+    return !!(t.hourly && t.guide && todaysWindow(t) === null);
+  }
+
+  function rowHref(t) {
+    if (needsGuideFirst(t)) return t.guide;
+    return usingBypass(t) ? t.bypass : t.path;
+  }
+
+  function linkTitle(t, st, direct) {
+    return [
+      t.name,
+      t.note,
+      direct ? BYPASS_NOTE : "",
+      needsGuideFirst(t) ? "opens Jellyneo \u2014 today's window is not set yet" : "",
+      st.label,
+    ]
+      .filter(Boolean)
+      .join(" \u00b7 ");
+  }
+
+  function buildRow({ t, st }) {
+    const row = document.createElement("div");
+    row.className = "nptm-row" + (st.ready ? " is-ready" : "");
+
+    // Icon and name are one link, so with the names switched off the icon
+    // is still the whole target rather than a picture beside a dead space.
+    const link = document.createElement("a");
+    link.className = "nptm-link";
+    const direct = usingBypass(t) && !needsGuideFirst(t);
+    link.href = rowHref(t);
+    link.title = linkTitle(t, st, direct);
+    if (settings.newTab) {
+      link.target = "_blank";
+      // noopener is the point here: the new tab gets no handle on this one.
+      link.rel = "noopener noreferrer";
+    }
+    link.appendChild(iconFor(t));
+    const name = document.createElement("span");
+    name.className = "nptm-name";
+    name.textContent = t.name;
+    link.appendChild(name);
+    // Following a bypass link IS the play — the handler acts on the GET —
+    // so the click is recorded here. It is the only way the Expellibox can
+    // be noticed at all: its handler is on ncmall.neopets.com, a separate
+    // origin this script neither runs on nor can read.
+    if (direct) link.addEventListener("click", () => markDone(t.id, "bypass"));
+    row.appendChild(link);
+
+    const time = document.createElement("span");
+    time.className = "nptm-time";
+    time.textContent = timeText(st);
+    row.appendChild(time);
+
+    // Per-row manual control: the escape hatch for every detection guess.
+    // A plain window row is plain clock, so there is nothing to correct.
+    let mark = null;
+    if (t.type !== "window" || t.cooldownMins) {
+      mark = document.createElement("button");
+      mark.className = "nptm-mark";
+      mark.type = "button";
+      mark.innerHTML = st.ready ? CHECK_SVG : CROSS_SVG;
+      mark.title = markTitle(t, st);
+      mark.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // `ready` is read at click time from the row's own state, not from
+        // the st captured when this row was built a while ago.
+        if (rowState(t).ready) markDone(t.id, "manual");
+        else clearDone(t.id);
+        render();
+      });
+      row.appendChild(mark);
+    }
+
+    // The clock is as much a handle as the name is, so a click anywhere in
+    // the row that is not the ✓ goes where the link goes — including its
+    // new-tab setting and, for a bypass row, the play it records.
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("a, .nptm-mark")) return;
+      link.click();
+    });
+
+    return { row, link, time, mark };
+  }
+
+  function renderRows(rows) {
+    const key = rowsSignature(rows);
+
+    if (key !== rowsKey) {
+      body.textContent = "";
+      rowCache = new Map();
+      rowsKey = key;
+
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.id = "nptm-empty";
+        empty.textContent = activeTrackers().length
+          ? "Nothing ready yet."
+          : "Nothing tracked \u2014 open the settings to pick some.";
+        body.appendChild(empty);
+        return;
+      }
+
+      for (const entry of rows) {
+        const built = buildRow(entry);
+        rowCache.set(entry.t.id, built);
+        body.appendChild(built.row);
+      }
+      return;
+    }
+
+    // Same rows, same order: write the numbers and the hover text, and leave
+    // every element (and its hover state) exactly where it is.
+    for (const { t, st } of rows) {
+      const built = rowCache.get(t.id);
+      if (!built) continue;
+      const text = timeText(st);
+      if (built.time.textContent !== text) built.time.textContent = text;
+      const title = linkTitle(t, st, usingBypass(t));
+      if (built.link.title !== title) built.link.title = title;
+      if (built.mark) {
+        const mt = markTitle(t, st);
+        if (built.mark.title !== mt) built.mark.title = mt;
+      }
+    }
+  }
+
+  function render() {
+    if (!panel) buildPanel();
+
+    const rows = activeTrackers()
+      .map((t) => ({ t, st: rowState(t) }))
+      .sort((a, b) => {
+        if (a.st.ready !== b.st.ready) return a.st.ready ? -1 : 1;
+        return a.st.ms - b.st.ms;
+      })
+      .filter(({ st }) => !settings.readyOnly || st.ready);
+
+    const ready = rows.filter(({ st }) => st.ready);
+    panel.dataset.anyReady = ready.length ? "1" : "0";
+    panel.dataset.compact = settings.compact ? "1" : "0";
+    mini.textContent = ready.length
+      ? `${ready.length} ready`
+      : rows.length
+        ? formatShort(rows[0].st.ms)
+        : "—";
+
+    body.style.setProperty(
+      "max-height",
+      `${Math.max(3, settings.maxRows) * (settings.compact ? 28 : 32) + 8}px`,
+      "important",
+    );
+    renderRows(rows);
+
+    // Alert on the transition into ready, for rows whose bell is on — never on
+    // first sight of a row that was already ready when the page loaded.
+    const nowReady = new Set(ready.map(({ t }) => t.id));
+    const fresh = [...nowReady].filter((id) => !lastReady.has(id) && alertsOn(id));
+    // `ticker` is only set after the first paint, so a row that was already
+    // ready when the page loaded is not announced — only a transition this
+    // tab actually watched happen.
+    if (fresh.length && ticker) {
+      const names = fresh.map((id) => BY_ID.get(id).name);
+      fireNotification(names);
+      fireBeep();
+      if (document.hidden) startTitleFlash(nowReady.size);
+    }
+    lastReady = nowReady;
+
+  }
+
+  // ---------------------------------------------------------------- settings
+
+  let shade = null;
+  let sheet = null;
+
+  function closeSettings() {
+    shade?.remove();
+    sheet?.remove();
+    shade = null;
+    sheet = null;
+  }
+
+  function cadenceText(t) {
+    if (t.type === "allowance") return `${t.uses} times a day`;
+    if (t.randomStart) return "once a day, random start hour";
+    if (t.type === "daily") return "resets at midnight NST";
+    if (t.type === "window") {
+      if (t.hourly) {
+        const m = todaysWindow(t);
+        if (m === "none") return "no window today";
+        return m === null
+          ? `${t.hourly} minutes an hour, at a minute that changes daily`
+          : `:${String(m).padStart(2, "0")} each hour, ${t.hourly} minutes`;
+      }
+      return t.windows.map(([a, b]) => `${a}:00–${b}:00 NST`).join(", ");
+    }
+    const h = Math.floor(t.mins / 60);
+    const m = t.mins % 60;
+    if (t.mins >= DAY) return `every ${Math.round(t.mins / DAY)} days`;
+    if (h && m) return `every ${h}h ${m}m`;
+    if (h) return `every ${h} hour${h > 1 ? "s" : ""}`;
+    return `every ${m} minutes`;
+  }
+
+  // What the settings page tells you about a row's detection, in the order
+  // the script actually tries: the page's words, then the page's requests,
+  // then a click. Window rows need none of it.
+  function detectionText(t) {
+    if (t.hourly) return "only counts inside the window";
+    if (t.type === "window") return "fixed hours";
+    if (t.used) return "reads the page";
+    if (usingBypass(t)) return "counted when you open the direct link";
+    return "watches the page's own requests";
+  }
+
+  function openSettings() {
+    if (sheet) return;
+    injectStyle();
+
+    shade = document.createElement("div");
+    shade.id = "nptm-shade";
+    shade.addEventListener("click", closeSettings);
+    document.body.appendChild(shade);
+
+    sheet = document.createElement("div");
+    sheet.id = "nptm-settings";
+
+    const header = document.createElement("header");
+    const hTitle = document.createElement("span");
+    hTitle.textContent = "Timers to track";
+    header.appendChild(hTitle);
+    const close = document.createElement("button");
+    close.id = "nptm-close";
+    close.type = "button";
+    close.innerHTML = CLOSE_SVG;
+    close.addEventListener("click", closeSettings);
+    header.appendChild(close);
+    sheet.appendChild(header);
+
+    const scroll = document.createElement("div");
+    scroll.className = "nptm-scroll";
+
+    // Global options first: they change what the panel does, not what it lists.
+    const globals = document.createElement("div");
+    const gHead = document.createElement("h4");
+    gHead.textContent = "Panel";
+    scroll.appendChild(gHead);
+    scroll.appendChild(globals);
+
+    const addGlobal = (key, label, hint, onEnable) => {
+      const row = document.createElement("label");
+      row.className = "nptm-opt";
+      const hintText = () => (typeof hint === "function" ? hint() : hint || "");
+      const whenEl = hint ? document.createElement("span") : null;
+      if (whenEl) whenEl.className = "nptm-opt-when";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !!settings[key];
+      box.addEventListener("change", () => {
+        settings[key] = box.checked;
+        saveSettings();
+        if (key === "flashTitle" && !box.checked) stopTitleFlash();
+        // This change event is a user gesture, which is the only moment a
+        // browser will hand over notification permission or let audio start —
+        // so the permission prompt and the test beep live here now.
+        if (box.checked && onEnable) onEnable();
+        if (whenEl) whenEl.textContent = hintText();
+        // This one changes what the rows below it say about themselves, so the
+        // page is rebuilt in place rather than left describing the old answer.
+        if (key === "useBypass" && sheet) {
+          const keepScroll = sheet.querySelector(".nptm-scroll")?.scrollTop || 0;
+          closeSettings();
+          openSettings();
+          const back = sheet?.querySelector(".nptm-scroll");
+          if (back) back.scrollTop = keepScroll;
+        }
+        render();
+      });
+      row.appendChild(box);
+      const name = document.createElement("span");
+      name.className = "nptm-opt-name";
+      name.textContent = label;
+      row.appendChild(name);
+      if (whenEl) {
+        whenEl.textContent = hintText();
+        row.appendChild(whenEl);
+      }
+      globals.appendChild(row);
+    };
+    addGlobal(
+      "notify",
+      "Desktop notification when something is ready",
+      notifyPermissionText,
+      requestNotifyPermission,
+    );
+    addGlobal("beep", "Beep when something is ready", null, fireBeep);
+    addGlobal("flashTitle", "Flash the tab title", "while the tab is hidden");
+    addGlobal("readyOnly", "Only list what is ready", "hide running countdowns");
+    addGlobal("newTab", "Open links in a new tab");
+    addGlobal(
+      "compact",
+      "Icons only, no names",
+      "narrower panel; names move to the tooltip",
+    );
+    addGlobal(
+      "useBypass",
+      "Use direct links where the real page is broken",
+      "Coconut Shy, Bagatelle, Expellibox",
+    );
+
+    // A field per tracker whose window has to be told to us, with a link to
+    // wherever it is published. Only the Symol Hole has one; it is built from
+    // the registry so a second would need no new code here.
+    //
+    // It cannot be fetched for you: jellyneo.net serves no
+    // access-control-allow-origin header, so the browser blocks a read of it
+    // from neopets.com, and the alternative — GM_xmlhttpRequest — would move
+    // this script into the manager's sandbox and cost it the page-context
+    // access the request-watching detection depends on. Pasting the line is
+    // the next best thing, so the field takes Jellyneo's own wording.
+    for (const t of TRACKERS.filter((x) => x.hourly)) {
+      const row = document.createElement("div");
+      row.className = "nptm-opt";
+
+      const label = document.createElement("span");
+      label.className = "nptm-opt-name";
+      label.textContent = `${t.name} window`;
+      row.appendChild(label);
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "nptm-min";
+      input.placeholder = ":57";
+      input.title =
+        'Paste Jellyneo\'s line ("XX:57:00 to XX:59:59"), or just the minute. ' +
+        '"none" for a day with no window.';
+      const current = todaysWindow(t);
+      if (current === "none") input.value = "none";
+      else if (current !== null) input.value = `:${String(current).padStart(2, "0")}`;
+
+      const hint = document.createElement("span");
+      hint.className = "nptm-opt-when";
+      const describe = () => {
+        const m = todaysWindow(t);
+        if (m === "none") return "no window today";
+        if (m === null) return "paste today's line, or click through from";
+        const end = Math.min(m + t.hourly, 60) - 1;
+        return `:${String(m).padStart(2, "0")}:00\u2013:${String(end).padStart(2, "0")}:59 every hour today`;
+      };
+
+      input.addEventListener("change", () => {
+        const parsed = parseWindowInput(input.value);
+        settings.hourlyWindows = settings.hourlyWindows || {};
+        if (parsed === undefined) {
+          delete settings.hourlyWindows[t.id];
+          SHARED.set(sharedWindowKey(t.id), null);
+          input.value = "";
+        } else {
+          // Dated, so tomorrow it asks again instead of running on yesterday's.
+          settings.hourlyWindows[t.id] = { minute: parsed, day: nstDateKey() };
+          SHARED.set(sharedWindowKey(t.id), { minute: parsed, day: nstDateKey() });
+          input.value =
+            parsed === "none" ? "none" : `:${String(parsed).padStart(2, "0")}`;
+        }
+        saveSettings();
+        hint.textContent = describe();
+        render();
+      });
+      row.appendChild(input);
+
+      hint.textContent = describe();
+      row.appendChild(hint);
+
+      if (t.guide) {
+        const guide = document.createElement("a");
+        guide.className = "nptm-guide";
+        guide.href = t.guide;
+        guide.target = "_blank";
+        guide.rel = "noopener noreferrer";
+        guide.textContent = "Jellyneo \u2197";
+        guide.title = "Today's window, published daily";
+        row.appendChild(guide);
+      }
+
+      globals.appendChild(row);
+    }
+
+    const cornerRow = document.createElement("label");
+    cornerRow.className = "nptm-opt";
+    const cornerName = document.createElement("span");
+    cornerName.className = "nptm-opt-name";
+    cornerName.textContent = "Corner";
+    cornerRow.appendChild(cornerName);
+    const cornerSel = document.createElement("select");
+    for (const c of ["bottom-left", "bottom-right", "top-left", "top-right"]) {
+      const opt = document.createElement("option");
+      opt.value = c;
+      opt.textContent = c.replace("-", " ");
+      if (settings.corner === c) opt.selected = true;
+      cornerSel.appendChild(opt);
+    }
+    cornerSel.addEventListener("change", () => {
+      settings.corner = cornerSel.value;
+      saveSettings();
+      // Rebuilt rather than repositioned, so the old corner's offsets go away.
+      panel?.remove();
+      panel = null;
+      render();
+    });
+    cornerRow.appendChild(cornerSel);
+    globals.appendChild(cornerRow);
+
+    // One section per category, each row a checkbox plus its own bell.
+    for (const cat of CATS) {
+      const list = TRACKERS.filter((t) => t.cat === cat);
+      if (!list.length) continue;
+      const h = document.createElement("h4");
+      h.textContent = cat;
+      scroll.appendChild(h);
+
+      for (const t of list) {
+        const row = document.createElement("div");
+        row.className = "nptm-opt";
+
+        row.appendChild(iconFor(t));
+
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.id = `nptm-on-${t.id}`;
+        box.checked = isOn(t.id);
+        box.addEventListener("change", () => {
+          settings.enabled[t.id] = box.checked;
+          if (box.checked && settings.alerts[t.id] === undefined) {
+            settings.alerts[t.id] = true;
+          }
+          saveSettings();
+          bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+          render();
+        });
+        row.appendChild(box);
+
+        const label = document.createElement("label");
+        label.className = "nptm-opt-name";
+        label.htmlFor = box.id;
+        label.textContent = t.name;
+        row.appendChild(label);
+
+        const when = document.createElement("span");
+        when.className = "nptm-opt-when";
+        when.textContent = [cadenceText(t), detectionText(t)]
+          .filter(Boolean)
+          .join(" · ");
+        row.appendChild(when);
+
+        const bell = document.createElement("button");
+        bell.type = "button";
+        bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+        bell.textContent = "\u{1F514}";
+        bell.title = "Alert when this one is ready";
+        bell.addEventListener("click", () => {
+          settings.alerts[t.id] = !alertsOn(t.id);
+          saveSettings();
+          bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+        });
+        row.appendChild(bell);
+
+        scroll.appendChild(row);
+      }
+    }
+
+    sheet.appendChild(scroll);
+
+    const footer = document.createElement("footer");
+    const mkBtn = (text, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "nptm-btn nptm-btn--sm";
+      b.textContent = text;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    footer.appendChild(
+      mkBtn("Default", () => {
+        settings.enabled = {};
+        settings.alerts = {};
+        TRACKERS.forEach((t) => {
+          if (t.on) {
+            settings.enabled[t.id] = true;
+            settings.alerts[t.id] = true;
+          }
+        });
+        saveSettings();
+        closeSettings();
+        openSettings();
+        render();
+      }),
+    );
+    footer.appendChild(
+      mkBtn("None", () => {
+        settings.enabled = {};
+        saveSettings();
+        closeSettings();
+        openSettings();
+        render();
+      }),
+    );
+    footer.appendChild(mkBtn("Done", closeSettings));
+    sheet.appendChild(footer);
+
+    document.body.appendChild(sheet);
+  }
+
+  // --------------------------------------------------------------------- wire
+
+  window.addEventListener("storage", (e) => {
+    if (e.key === STATE_KEY) render();
+    if (e.key === SETTINGS_KEY) {
+      settings = { ...DEFAULTS, enabled: {}, alerts: {}, ...(readJSON(SETTINGS_KEY, {}) || {}) };
+      panel?.remove();
+      panel = null;
+      render();
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) stopTitleFlash();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && sheet) closeSettings();
+  });
+
+  function start() {
+    // On the guide site the script is a reader, not a panel.
+    if (GUIDE_HOSTS.test(location.hostname)) {
+      guideMode();
+      return;
+    }
+
+    consumeWindowHash();
+    const here = matchTracker();
+    if (here && isOn(here.id)) {
+      watchForVisit(here);
+      console.info(`${TAG} on ${here.name}`);
+    }
+    render();
+    // Derived from stored timestamps rather than accumulated ticks, so a
+    // throttled or suspended tab still shows the right number when read.
+    ticker = setInterval(render, 1000);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+})();

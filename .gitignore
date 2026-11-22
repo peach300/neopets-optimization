@@ -1,0 +1,12 @@
+# Allowlist, not a blocklist. This repository publishes the userscripts and
+# nothing else: the working notes, datasets and scraping tools that live
+# beside them in the same folder stay local. Ignoring everything first and
+# then un-ignoring by name means a new file is private until it is named
+# here, which is the right default when the folder also holds measurements
+# tied to a Neopets account.
+*
+
+!.gitignore
+!LICENSE
+!README.md
+!*.user.js
