@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.5
+// @version      1.6
 // @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, for the pet-boredom mechanic, and stops itself when the page says the pet is bored. Each play submits the game's own form, which costs its usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -344,6 +344,7 @@
     state.noteKind = kind || "stop";
     save();
     clearInterval(tick);
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
     console.info(`${TAG} ${game}: stopped (${state.noteKind}) - ${note}`);
     render();
   }
@@ -475,7 +476,37 @@
       return;
     }
     render();
-  }, 250);
+  }, 1000);
+
+  // The countdown is repainted on its own, from requestAnimationFrame, and not
+  // from the interval above. The interval has to keep its period long, because
+  // its job is the due check and a browser throttles a background tab's timers
+  // to about once a minute whatever period you ask for - but a clock showing
+  // tenths and repainted on that same beat moves in visible steps, which is
+  // what made this choppy at 250ms: four repaints a second against a digit
+  // that changes ten times a second.
+  //
+  // rAF is the right clock for the display and the wrong one for the due
+  // check: it runs at the refresh rate when the tab is visible and stops dead
+  // when it is not. Splitting them gives a smooth countdown in front of you
+  // and a run that still advances behind your back.
+  let frame = 0;
+  function paintClock() {
+    frame = 0;
+    if (!panel || !state.running || !state.nextAt) return;
+    const text = fmtSeconds(state.nextAt - Date.now());
+    if (vNext.textContent !== text) vNext.textContent = text;
+    frame = requestAnimationFrame(paintClock);
+  }
+  function startClock() {
+    if (!frame) frame = requestAnimationFrame(paintClock);
+  }
+  // Hidden tabs do not fire rAF, so the loop dies when you switch away and has
+  // to be restarted when you come back; without this the countdown stays
+  // frozen on whatever it last showed.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) startClock();
+  });
 
   // ----------------------------------------------------------------- the panel
   //
@@ -698,12 +729,12 @@
     (document.body || document.documentElement).appendChild(panel);
   }
 
-  // Rounded to a tenth while a load is seconds away and to the second above
-  // that, so the fast end reads as a countdown and a 45s break does not flicker
-  // a decimal nobody is watching.
+  // Tenths throughout. An earlier version switched to whole seconds above 10s,
+  // which meant the readout changed character partway down a 12-15s pause -
+  // one jump a second, then suddenly ten. One format the whole way is steadier
+  // to watch, and the tabular figures stop the width moving.
   function fmtSeconds(ms) {
-    const s = Math.max(0, ms / 1000);
-    return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
+    return `${Math.max(0, ms / 1000).toFixed(1)}s`;
   }
 
   function render() {
@@ -717,9 +748,12 @@
 
     vCount.textContent = `${state.plays} / ${CONFIG.MAX_REFRESHES}`;
 
-    vNext.textContent = state.running && state.nextAt
-      ? fmtSeconds(state.nextAt - Date.now())
-      : "—";
+    if (state.running && state.nextAt) {
+      vNext.textContent = fmtSeconds(state.nextAt - Date.now());
+      startClock();
+    } else {
+      vNext.textContent = "—";
+    }
 
     elNote.textContent = state.note || "";
     elNote.hidden = !state.note;
