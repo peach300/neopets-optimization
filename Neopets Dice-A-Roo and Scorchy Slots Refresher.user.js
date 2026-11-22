@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.3
-// @description  Reloads the Dice-A-Roo or Scorchy Slots landing page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored, with any unfamiliar line in the game's own column as the backstop. Reloads only; it never submits the play form, so it never spends NP.
+// @version      1.4
+// @description  Reloads the Dice-A-Roo or Scorchy Slots page on a randomised interval, which is what "playing" means for the pet-boredom mechanic, and stops itself when the page says the pet is bored. Reloads only; it never submits a form, so it never spends NP.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
 // @match        *://www.neopets.com/games/play_dicearoo.phtml*
@@ -25,57 +25,52 @@
 // not a metronome, and noticing the stop signal on the first load it appears on
 // rather than fifty loads later.
 //
-// THE REFRESH HAS TO COME FROM THE LANDING PAGE
+// WHICH PAGES A RELOAD IS A PLAY ON
 //
-// The two games are laid out differently, and both captured pages are worth
-// stating exactly, because an earlier version of this gate silently stood the
-// script down on one of them.
+// The two games differ here, and assuming they were the same broke this twice.
+// Both captured pages are worth stating exactly.
 //
-//   Dice-A-Roo   landing /games/dicearoo.phtml, which posts to
-//                /games/play_dicearoo.phtml with a hidden raah=init. The play
-//                page is a separate document holding the roll state, so
-//                reloading it re-posts a stale init and drops you back on the
-//                landing page mid-game. Its button reads "Lets Play! (Costs 5 NP)".
+//   Dice-A-Roo    /games/dicearoo.phtml is the landing page and posts to
+//                 /games/play_dicearoo.phtml with a hidden raah=init. The play
+//                 page is a separate document holding the roll state, so
+//                 reloading it re-posts a stale init and drops you back on the
+//                 landing page mid-game. Only the landing page is reloaded.
 //
-//   Scorchy Slots  landing /games/slots.phtml, which posts to *itself* with a
-//                hidden play=yes. Landing and play therefore share one URL, so
-//                no URL test can tell them apart. Its button reads "Click Here
-//                to Play" - not "Lets Play", which is why a gate written around
-//                that one phrase matched Dice-A-Roo and silently ignored
-//                Scorchy Slots: no panel, no run, no error.
+//   Scorchy Slots /games/slots.phtml serves two different pages under one URL:
+//                 the landing form before a game (hidden play=yes, button
+//                 "Click Here to Play"), and the reels once a game is in
+//                 progress (form posting to process_slots2.phtml, button "Play
+//                 Again"). Both are reached by GET at that URL, so reloading
+//                 either is safe - no re-post, nothing lost - and both count.
 //
-// So the gate is per game and keyed on the landing form's own hidden field,
-// which is the one thing on each page that says "this is the page that starts a
-// game" rather than "this is a page about this game":
+// That second case is the one that kept going wrong. The button's label was the
+// first gate, and "Click Here to Play" is not "Lets Play", so the script
+// silently ignored Scorchy Slots entirely: no panel, no run, no error. Keying
+// on the landing form's hidden field fixed that but was still too narrow, since
+// the site keeps serving the reels once you have played - so a run would start
+// and then stop itself on the very next load. Hence refreshable() per game,
+// which answers the only question that matters: is reloading *this* page a
+// play, or would it break something.
 //
-//   - the document title names the game, and
-//   - its landing marker is present (raah=init / play=yes), and
-//   - no button on the page reads "Play Again".
+// Nothing is ever submitted. On the reels page the script reloads, it does not
+// click Play Again - that would be a real spin at 5 NP each, and at the cap
+// that is 750 NP a run.
 //
-// The last is a guard for Scorchy Slots specifically. Its play page is one URL
-// I have not captured; the rules text on the landing page says a new game is
-// started with a "Play Again" button, so if that page also carries play=yes the
-// title and marker alone would not separate them. If it turns out the slots play
-// page is distinguishable some other way, tighten LANDING_MARKER rather than
-// loosening this.
+// @match names only dicearoo.phtml, play_dicearoo.phtml and slots.phtml.
+// Anything else is not a page of these two games, and a page that fails
+// refreshable() draws nothing and starts nothing.
 //
-// @match now names only those three paths. Anything else is not a page of these
-// two games, and a page that fails the gate does nothing at all - no panel, no
-// timer, no listeners.
+// HOW IT KNOWS THE PET IS BORED
 //
-// HOW IT KNOWS THE PET IS BORED - TWO LAYERS
+// The boredom line is the point of the run, so it is checked before the faults
+// and before the caps: if a load is both the 150th and the bored one, it is the
+// bored one. Matching it ends the run as a success - green header, "run
+// complete", and the load count recorded so a second run has a number to expect
+// rather than only the caps.
 //
-// The boredom line is the point of the run, so it gets a check of its own,
-// before the faults and before the caps: if a load is both the 150th and the
-// bored one, it is the bored one. Matching it ends the run as a success - green
-// and bold on the panel, "run complete", and the load count recorded so a
-// second run has a number to expect rather than only the caps.
-//
-// WHERE THE LINE IS, AND WHERE IT IS NOT
-//
-// A captured bored page settles both. It is served at
-// /games/play_dicearoo.phtml, carries the game's own title, has no "Lets Play"
-// button, and its content column reads:
+// A captured bored page says where that line lives. It is served at
+// /games/play_dicearoo.phtml, carries the game's own title, and its content
+// column reads:
 //
 //     Im SO BORED of Dice-A-Roo... let's play something else!
 //     Click here for the Games Room!
@@ -89,40 +84,24 @@
 // tracks overall happiness and has nothing to say about being bored of one
 // particular game.
 //
-// Second, the line does not appear on the landing page, so the gate below would
-// stand the script down on the very page that announces the result and report
-// it as "left the landing page" - throwing away the one outcome the run exists
-// to reach. The boredom check therefore runs *before* the gate, on any page of
-// this game, and a bored page ends the run as a success wherever it is served.
+// Second, the line appears on a page that is not refreshable, so checking it
+// only on pages the script reloads would throw away the one outcome the run
+// exists to reach. The boredom check therefore runs first, on any page of the
+// game, and ends the run as a success wherever that line is served.
 //
-// Layer one is wording: BORED_PATTERNS, led by the captured line. Note the
-// shape of it - no apostrophe in "Im", and "SO" with a single o, which an
-// earlier guess requiring "soo" would have missed.
+// BORED_PATTERNS is led by the captured line. Note its shape - no apostrophe in
+// "Im", and "SO" with a single o, which an earlier guess requiring "soo" would
+// have missed. The list is deliberately broader than that one line, because
+// Scorchy Slots' wording for this has never been seen; if a slots run reaches
+// the 150-load cap without ending, read the page and add its wording here.
 //
-// Layer two exists because none of those wordings is one I could verify, and
-// matching only a guessed string would mean refreshing straight past the one
-// event the run exists to catch. So the backstop is inverted: the script learns
-// what this landing page normally says, by storing every line of its content
-// area with digits normalised to "#", and stops when a line appears that is not
-// in that set. That catches the boredom line whatever it says - reported as an
-// unexpected stop rather than as a finished run, which is the signal to read the
-// line and add it to BORED_PATTERNS. It also catches a random event, an "Oops",
-// a jackpot-winner notice, a logged-out page and the visiting-too-quickly page,
-// all of which you want a refresher to stop for and a wording list would miss.
-//
-// The cost is a learning period: the first LEARN_LOADS loads are spent building
-// the baseline, during which layer two does not stop for anything (layer one
-// still does). Keep that number small and expect one or two false halts in the
-// first run of a new month, when the site swaps an event banner in. "Forget page
-// text" clears the baseline if the page genuinely changed for good.
-//
-// Both wording lists are checked on every load, learnt or not, so a pattern the
-// page's own text happens to contain would end every run on load one - and a
-// BORED_PATTERNS hit would do it while reporting success. The learning pass
-// therefore tests both lists against the column and warns in the console if any
-// of them already matches, naming the list to drop it from. Scorchy Slots makes
-// that worth having: its landing page prints the full rules, which is a lot more
-// prose for a pattern to collide with than Dice-A-Roo's.
+// Both wording lists are checked on every load, so a pattern the page's own
+// text happens to contain would end every run on load one - and a
+// BORED_PATTERNS hit would do it while reporting success. While the panel is
+// idle the script therefore tests both lists against the column and warns in
+// the console if any of them already matches, naming the list to drop it from.
+// Scorchy Slots makes that worth having: its landing page prints the full
+// rules, a lot more prose for a pattern to collide with than Dice-A-Roo's.
 //
 // SCOPE
 //
@@ -164,20 +143,10 @@
     // long breaks folded in is nearer 9. Anything above 40 is a loop, not luck.
     MAX_PER_MINUTE: 40,
 
-    // Loads spent learning what this page normally says before new text counts
-    // as a stop signal. 2 is enough; 1 means a line that only appears half the
-    // time (a rotating banner) will halt the next run.
-    LEARN_LOADS: 2,
-
-    // Halt when the content area shows a line not seen during learning. This is
-    // the main stop condition; turning it off leaves only the caps and the
-    // wording list below, which is a much worse way to catch the boredom line.
-    HALT_ON_NEW_TEXT: true,
-
     // The boredom line itself - the thing the run is for. Checked before
-    // anything else and on every load, learnt or not, so a line that somehow got
-    // into the baseline during learning still ends the run. Matching one of
-    // these is a finished run, not a fault, and the panel says so.
+    // anything else and on every load, including pages the script will not
+    // reload. Matching one of these is a finished run, not a fault, and the
+    // panel says so.
     //
     // Matched against the game's own column only - the pet's sidebar is not
     // read. The list is deliberately broader than the one captured line, since
@@ -217,39 +186,39 @@
 
   // ------------------------------------------------------------------ the gate
 
-  // One entry per game. LANDING_MARKER is the hidden field the landing form
-  // carries and nothing else does - it is what the form posts to start a game,
-  // so it marks the page that starts one. Matching on that rather than on the
-  // button's label is what makes this work for both games at once: the labels
-  // differ ("Lets Play! (Costs 5 NP)" against "Click Here to Play") and a gate
-  // written around either one ignores the other without saying so.
+  // One entry per game. refreshable() answers the only question that matters:
+  // is reloading *this* page a play, or would it break something? The two games
+  // answer differently, and assuming they were the same is what broke this
+  // twice.
   const GAMES = [
     {
       name: "Dice-A-Roo",
       title: /dice\s*-?\s*a\s*-?\s*roo/i,
-      LANDING_MARKER: 'input[name="raah"][value="init"]',
+      // The landing page only, identified by the hidden field its form posts.
+      // play_dicearoo.phtml is a separate document holding the roll state, and
+      // reloading it re-posts a stale init, so it is read for the boredom line
+      // and never refreshed.
+      refreshable: () => !!document.querySelector('input[name="raah"][value="init"]'),
     },
     {
       name: "Scorchy Slots",
       title: /scorchy/i,
-      LANDING_MARKER: 'input[name="play"][value="yes"]',
+      // slots.phtml serves two different pages under one URL: the landing form
+      // before a game, and the reels once one is in progress. Both are reached
+      // by GET at that URL, so reloading either is safe - no re-post, no lost
+      // state. Gating on the landing form alone was wrong, because the site
+      // keeps serving the reels once you have played, so a run would start and
+      // then stop itself on the next load.
+      refreshable: () =>
+        !!document.querySelector('input[name="play"][value="yes"]')
+        || !!document.querySelector('form[action*="process_slots"]'),
     },
   ];
-
-  // Any button that starts a *further* game rather than the first one. Scorchy
-  // Slots' landing page describes its play page as having one, and that play
-  // page shares the landing URL, so this is the separator of last resort.
-  function hasPlayAgain() {
-    for (const el of document.querySelectorAll('input[type="submit"], button')) {
-      if (/play again/i.test((el.value || el.textContent || ""))) return true;
-    }
-    return false;
-  }
 
   const entry = GAMES.find((g) => g.title.test(document.title || ""));
   if (!entry) return;
   const game = entry.name;
-  const onLanding = !!document.querySelector(entry.LANDING_MARKER) && !hasPlayAgain();
+  const canRefresh = entry.refreshable();
 
   // --------------------------------------------------------------- the content
 
@@ -270,22 +239,10 @@
     return (contentRoot().innerText || "").replace(/\s+/g, " ");
   }
 
-  // Lines of that column, digits flattened to "#" so the jackpot figure and the
-  // NP totals do not each count as a sentence never seen before.
-  function contentLines() {
-    const text = (contentRoot().innerText || "").replace(/\u00a0/g, " ");
-    const out = [];
-    for (const raw of text.split("\n")) {
-      const line = raw.replace(/[\d,]+/g, "#").replace(/\s+/g, " ").trim();
-      if (line.length >= 12) out.push(line);
-    }
-    return out;
-  }
-
   // ----------------------------------------------------------------- the store
 
   // Keyed per game, so a Dice-A-Roo run and a Scorchy Slots run are separate
-  // runs with separate counts, caps and learnt page text.
+  // runs with separate counts and caps.
   const KEY = `gameRefresher.${game.replace(/\W+/g, "").toLowerCase()}`;
 
   const BLANK = {
@@ -293,8 +250,6 @@
     count: 0,            // page loads this run
     startedAt: 0,        // ms, this run
     nextAt: 0,           // ms, when the next load is due
-    loads: 0,            // loads ever seen, for the learning period
-    known: [],           // learnt content lines
     recent: [],          // ms timestamps of recent loads, for MAX_PER_MINUTE
     note: "",            // why it stopped, shown on the panel after a halt
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
@@ -359,15 +314,6 @@
     for (const re of CONFIG.HALT_PATTERNS) {
       const m = text.match(re);
       if (m) return `page matched ${re} ("${m[0]}") - look at the page`;
-    }
-
-    if (CONFIG.HALT_ON_NEW_TEXT && state.loads > CONFIG.LEARN_LOADS) {
-      const known = new Set(state.known);
-      const fresh = contentLines().filter((l) => !known.has(l));
-      if (fresh.length) {
-        console.info(`${TAG} new text on the page:`, fresh);
-        return `new text on the page: "${fresh[0].slice(0, 90)}"`;
-      }
     }
 
     if (state.count >= CONFIG.MAX_REFRESHES) {
@@ -663,22 +609,6 @@
     btnRun.addEventListener("click", () => (state.running ? stop() : start()));
     buttons.appendChild(btnRun);
 
-    const btnForget = document.createElement("button");
-    btnForget.className = "nprf-btn nprf-btn--sm";
-    btnForget.textContent = "Forget text";
-    btnForget.title =
-      "Throw away the learnt baseline and learn it again. Use this when the page has"
-      + " genuinely changed for good - a new event banner - and every load now stops.";
-    btnForget.addEventListener("click", () => {
-      state.known = [];
-      state.loads = 0;
-      state.note = "Page text forgotten; relearning.";
-      state.noteKind = "info";
-      save();
-      render();
-    });
-    buttons.appendChild(btnForget);
-
     body.appendChild(buttons);
     panel.appendChild(body);
     (document.body || document.documentElement).appendChild(panel);
@@ -705,13 +635,9 @@
       ? `${state.count} / ${CONFIG.MAX_REFRESHES}`
       : `0 / ${CONFIG.MAX_REFRESHES}`;
 
-    if (state.running && state.nextAt) {
-      vNext.textContent = fmtSeconds(state.nextAt - Date.now());
-    } else if (state.loads <= CONFIG.LEARN_LOADS) {
-      vNext.textContent = `learn ${state.loads}/${CONFIG.LEARN_LOADS}`;
-    } else {
-      vNext.textContent = "—";
-    }
+    vNext.textContent = state.running && state.nextAt
+      ? fmtSeconds(state.nextAt - Date.now())
+      : "—";
 
     elNote.textContent = state.note || "";
     elNote.hidden = !state.note;
@@ -737,7 +663,7 @@
   // stale count. A run that has left the landing page has ended, and the store
   // has to say so. This is also the one place that can name *why*, since the
   // page that interrupted it is the page in front of us.
-  if (!onLanding) {
+  if (!canRefresh) {
     clearInterval(tick);
     // The boredom check comes first, and deliberately runs on a page the script
     // will not refresh. The captured bored page is served at
@@ -765,7 +691,7 @@
       state.nextAt = 0;
       state.note = err
         ? "Stopped: the site served its wrong-place error. A reload of the *play* page does that - this script only ever reloads the landing page, so something else navigated."
-        : "Stopped: left the landing page (a game was started, or the site served another page).";
+        : "Stopped: this page is not one a reload would play - the site served something else.";
       state.noteKind = "stop";
       save();
       console.info(`${TAG} ${game}: ${state.note}`);
@@ -778,23 +704,15 @@
 
   // ------------------------------------------------------------------- the run
 
-  // This load counts, whether or not a run is going: the learning period needs
-  // ordinary loads too.
-  state.loads += 1;
   state.recent = state.recent.filter((t) => t > Date.now() - 120000).concat(Date.now());
 
-  if (state.loads <= CONFIG.LEARN_LOADS) {
-    const known = new Set(state.known);
-    for (const l of contentLines()) known.add(l);
-    state.known = Array.from(known);
-    console.info(`${TAG} ${game}: learning page text (${state.loads}/${CONFIG.LEARN_LOADS}), ${state.known.length} lines`);
-
-    // Both pattern lists are checked on every load, learnt or not, so one that
-    // the page's own rules text happens to contain would end the run on its
-    // first load, every time, with no obvious cause - and a BORED_PATTERNS hit
-    // would do it while reporting the run a success. Say so now rather than
-    // then. Dice-A-Roo's rules talk about losing and proceeding and name no
-    // moods, but Scorchy Slots' text is not something I could read to check.
+  // Checked while idle, which is when you would read it. A pattern the page's
+  // ordinary text happens to contain would end a run on its first load, every
+  // time, with no obvious cause - and a BORED_PATTERNS hit would do it while
+  // reporting the run a success. Scorchy Slots makes this worth keeping: its
+  // landing page prints the full rules, far more prose for a pattern to
+  // collide with than Dice-A-Roo's.
+  if (!state.running) {
     const text = contentText();
     const lists = [["BORED_PATTERNS", CONFIG.BORED_PATTERNS], ["HALT_PATTERNS", CONFIG.HALT_PATTERNS]];
     for (const [which, list] of lists) {
