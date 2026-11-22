@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.8
+// @version      1.9
 // @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -298,6 +298,13 @@
       // script down there - this is for the case where it is served in place of
       // the landing page itself.
       /directed to this page from the wrong place/i,
+      // Captured live, from /games/dicearoo.phtml: the whole content column
+      // reads "Sorry, this game is unavailable...". That is what the site
+      // serves a session it does not recognise, and presumably also a game
+      // TNT has switched off. Worth its own wording because the alternative
+      // is the gate reporting "nothing here starts a play", which is true and
+      // tells you nothing about why.
+      /this game is unavailable/i,
     ],
   };
 
@@ -650,6 +657,11 @@
   let nextForm = pageForm;
   let nextBase = location.href;
   let busy = false;
+  // Set on a page no run can start from. The stand-down path below stops the
+  // timer, so the panel's button would be there and do nothing; this is what
+  // tells render() to show it disabled instead of lying about what a click
+  // would do.
+  let standDown = false;
 
   function sleep(ms) {
     return new Promise((done) => setTimeout(done, ms));
@@ -997,6 +1009,15 @@
                   inset 0 2px 0 1px rgba(253,249,220,1),
                   0 0 0 2px rgba(0,0,0,1) !important;
     }
+    /* Disabled, for a page no run can start from. Flat, since the bevel above
+       is what makes the button read as pressable. */
+    .nprf-btn:disabled {
+      cursor: not-allowed !important; color: #7b7b7b !important;
+      background: linear-gradient(#efefef, #dcdcdc) !important;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,1),
+                  inset 0 -2px 2px 2px rgba(0,0,0,0.07),
+                  0 0 0 2px rgba(0,0,0,0.45) !important;
+    }
     .nprf-btn--sm {
       font-size: 9pt !important; padding: 2px 10px 5px !important;
       margin-top: 5px !important;
@@ -1120,6 +1141,10 @@
     }
 
     btnRun.textContent = state.running ? "Stop" : "Start";
+    btnRun.disabled = standDown && !state.running;
+    btnRun.title = btnRun.disabled
+      ? "Nothing on this page starts a play."
+      : state.running ? "Stop the run." : "Start a run.";
   }
 
   // ------------------------------------------------- not the landing page
@@ -1132,6 +1157,7 @@
   // page that interrupted it is the page in front of us.
   if (!canAct) {
     clearInterval(tick);
+    standDown = true;
     // The boredom check comes first, and deliberately runs on a page the script
     // will not refresh. The captured bored page is served at
     // /games/play_dicearoo.phtml, carries the game's title and the line "Im SO
@@ -1152,20 +1178,41 @@
       return;
     }
 
+    // What the page says about itself, if it says anything, so that a stand-down
+    // can name the reason instead of only the symptom. "Sorry, this game is
+    // unavailable..." is the case that prompted this: the gate's own account of
+    // it was "nothing here starts a play", which is true and useless.
+    const said = checkPage();
+
     if (state.running) {
       const err = /directed to this page from the wrong place/i.test(document.body.innerText || "");
       state.running = false;
       state.nextAt = 0;
       state.note = err
         ? "Stopped: the site served its wrong-place error. A reload of the *play* page does that - this script only ever reloads the landing page, so something else navigated."
-        : "Stopped: nothing here starts a play and there is no way back - the site served something else.";
+        : said
+          ? `Stopped: ${said}`
+          : "Stopped: nothing here starts a play and there is no way back - the site served something else.";
       state.noteKind = "stop";
       save();
       console.info(`${TAG} ${game}: ${state.note}`);
       render();
       return;
     }
-    console.info(`${TAG} ${game}, but not the landing page (no "Lets Play" button); standing down`);
+
+    if (said) {
+      // Idle, and the page is not one a run could start from. Say so on the
+      // panel rather than only in the console, since this is the state you
+      // would be looking at the panel to explain.
+      state.note = said;
+      state.noteKind = "info";
+      save();
+      console.info(`${TAG} ${game}: ${said}; standing down`);
+      render();
+      return;
+    }
+
+    console.info(`${TAG} ${game}, but no form on this page starts a play; standing down`);
     return;
   }
 
