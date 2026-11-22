@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      1.9
+// @version      2.0
 // @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -114,13 +114,40 @@
 // front of you are not the reels being played, and the button under your mouse
 // is a play the loop has already moved past.
 //
-// Whether the site counts a request-play the same as a click-play for the
-// boredom mechanic is the one thing here assumed rather than measured. The
-// request carries the same method, URL, fields and cookies; the only
-// difference is that it is not a navigation, which the site would have to be
-// reading fetch metadata to notice. If a run never reaches the boredom line,
-// that assumption is the first thing to doubt, and BACKGROUND_PLAYS false is
-// the way to test it.
+// WHAT THE LIVE SITE TURNED OUT TO DO
+//
+// All of the following is measured against www.neopets.com on a real session,
+// not inferred.
+//
+// A request-play works. This was the one assumption in the design, and it
+// holds: a POST built from the form, sent by fetch with the session cookies,
+// comes back as the game's own answer - the reels, a roll, or the boredom
+// line. The site does not appear to care that it was not a navigation.
+//
+// Both play forms carry a hidden _ref_ck token. This is exactly the case the
+// chain was built for, and it is why the next play's form is taken from the
+// last answer rather than replayed from the page. The token looked stable
+// across pages and plays, so it is probably per session rather than per page -
+// but nothing depends on that, because the chain never reuses one.
+//
+// A play takes about a second: eleven plays in one run came back a median
+// 1.09s apart, with occasional 3-6s answers, and a plain GET of a game page
+// about 650ms. So the site's own latency, not the configured delay, is most of
+// what paces a burst, and the real rate is nearer 30 plays a minute than the
+// 53 the same settings produced against a 250ms stub. A slow night is a slow
+// run.
+//
+// Sustained plays were not rate-limited. Seventeen plays at roughly one a
+// second drew no "too fast" page, no error and no 4xx.
+//
+// But a fetch sometimes just fails. A live run died on its eleventh play with
+// a bare TypeError, "Failed to fetch", and twenty immediately following
+// requests all succeeded - so it was transient rather than a block, and not
+// about the URL (a hardcoded absolute URL failed while the identical string
+// built from location.origin succeeded, moments apart). This is the one thing
+// a navigating loop never had to handle: a failed navigation leaves you on a
+// page, where the next tick simply tries again. A failed fetch ended the whole
+// run. See RECOVERING FROM A FAILED PLAY below.
 //
 // HOW IT KNOWS THE PET IS BORED
 //
@@ -230,6 +257,14 @@
     LONG_PAUSE_CHANCE: 0.12,
     LONG_PAUSE_MIN_SECONDS: 12,
     LONG_PAUSE_MAX_SECONDS: 15,
+
+    // Consecutive failed sends to tolerate before giving up, and how long to
+    // wait before resyncing after one. Live, a run died on its eleventh play
+    // with a bare "Failed to fetch" while the twenty requests after it all
+    // succeeded, so one flaky send is not a reason to end a run - but a string
+    // of them means the session or the site is gone.
+    PLAY_RETRIES: 3,
+    RETRY_BACKOFF_MS: 1500,
 
     // Hard stops for the current run, counted across page loads.
     //
@@ -342,6 +377,9 @@
       // it re-posts a stale init, which is what gets you the site's red
       // wrong-place error.
       returnUrl: "/games/dicearoo.phtml",
+      // Where to GET to find out what the server currently thinks, after a
+      // send fails. The same page for this game; Scorchy Slots differs.
+      resyncUrl: "/games/dicearoo.phtml",
     },
     {
       name: "Scorchy Slots",
@@ -357,6 +395,11 @@
         return doc.querySelector('form[action*="process_slots"]');
       },
       returnUrl: null,
+      // No walk back is needed mid-run, but a resync after a failed send still
+      // has somewhere to look: slots.phtml serves the reels while a game is in
+      // progress and the landing form when one is not, so either way this
+      // answers with a form the chain can continue from.
+      resyncUrl: "/games/slots.phtml",
     },
   ];
 
@@ -588,6 +631,25 @@
     );
   }
 
+  // ---------------------------------------------- recovering from a failed play
+  //
+  // RECOVERING FROM A FAILED PLAY
+  //
+  // A fetch that throws tells you nothing about whether the server saw the
+  // request. So a retry cannot simply re-send it: if the first one did land,
+  // re-sending buys a second play and leaves the chain's idea of the game one
+  // step behind the server's.
+  //
+  // Instead the recovery throws away the form it was holding and GETs the
+  // game's own page, which answers with whatever the server now thinks the
+  // state is - the reels mid-game, the landing form otherwise - and the chain
+  // carries on from that. It costs one extra request and it cannot
+  // double-play.
+  //
+  // The play is still counted. It was sent, it may well have been charged, and
+  // a count that only includes plays whose answers came back would understate
+  // what the run cost.
+
   // ------------------------------------------------------------- the request
   //
   // A play as an HTTP request rather than a navigation, built from the form
@@ -657,6 +719,9 @@
   let nextForm = pageForm;
   let nextBase = location.href;
   let busy = false;
+  // Consecutive failed sends. Module scope rather than per-round, so a run
+  // that fails once at the end of every round still eventually gives up.
+  let fails = 0;
   // Set on a page no run can start from. The stand-down path below stops the
   // timer, so the panel's button would be there and do nothing; this is what
   // tells render() to show it disabled instead of lying about what a click
@@ -709,6 +774,29 @@
     return inspect(got.doc);
   }
 
+  // Throw away the form we were holding and ask the server what it currently
+  // thinks. Used after a failed send, where re-sending could double-play - see
+  // RECOVERING FROM A FAILED PLAY above. Returns whether the chain can carry
+  // on, and anything the resync page itself said.
+  async function resync() {
+    nextForm = null;
+    await sleep(CONFIG.RETRY_BACKOFF_MS);
+    const url = entry.resyncUrl || entry.returnUrl;
+    if (!url) return { ok: false, said: null };
+    try {
+      const got = await fetchDoc(resolve(url, location.href), { method: "GET" });
+      if (got.status >= 400) return { ok: false, said: null };
+      nextBase = got.url;
+      // A null form is not a failure: Dice-A-Roo's walk-back in playOnce picks
+      // that up. What matters is that the page answered.
+      nextForm = entry.playForm(got.doc);
+      return { ok: true, said: inspect(got.doc) };
+    } catch (err) {
+      console.warn(`${TAG} ${game}: resync failed`, err);
+      return { ok: false, said: null };
+    }
+  }
+
   // A round: a handful of plays, one at a time. The run can end on any of
   // them, which is the point of reading each answer rather than the next page.
   async function burst() {
@@ -724,10 +812,39 @@
         let said;
         try {
           said = await playOnce();
+          fails = 0;
         } catch (err) {
-          console.warn(`${TAG} ${game}: play request failed`, err);
-          halt(`Stopped: a play could not be sent (${err && err.message}).`, "stop");
-          return;
+          // A send that throws says nothing about whether the server saw it, so
+          // this resyncs rather than re-sending. Live, a single one of these
+          // ended an eleven-play run while the next twenty requests all
+          // succeeded; one is not a reason to stop.
+          fails += 1;
+          console.warn(
+            `${TAG} ${game}: play ${state.plays} could not be sent`
+            + ` (${fails}/${CONFIG.PLAY_RETRIES})`, err,
+          );
+          if (fails >= CONFIG.PLAY_RETRIES) {
+            halt(
+              `Stopped: ${fails} plays in a row could not be sent`
+              + ` (${err && err.message}). Check you are still logged in.`,
+              "stop",
+            );
+            return;
+          }
+          const back = await resync();
+          if (back.said) {
+            if (back.said.kind === "bored") state.lastBored = { at: Date.now(), count: state.plays };
+            halt(back.said.note, back.said.kind);
+            return;
+          }
+          if (!back.ok) {
+            halt("Stopped: a play failed and the game page would not answer either.", "stop");
+            return;
+          }
+          // The failed attempt does not spend one of this round's plays.
+          i -= 1;
+          render();
+          continue;
         }
 
         if (said) {
