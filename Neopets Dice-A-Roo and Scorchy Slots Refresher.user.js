@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.0
+// @version      2.2
 // @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -107,8 +107,40 @@
 // landing page is a background GET, so a long run leaves the Back button alone
 // completely.
 //
-// One thing is worse: the page you are looking at goes stale the moment the
-// first background play lands. It still shows the form it was served with
+// SHOWING THAT IT IS WORKING
+//
+// Playing underneath the page costs the run the only progress indicator it
+// used to have: the page itself. Before this, a play was a page load, so a
+// working run was obvious and a stuck one equally so. Now the document never
+// changes - the dice never move, the reels never spin, nothing reloads - and
+// a run that is working looks precisely like a run that is doing nothing. The
+// first report after this landed was, reasonably, "nothing is happening".
+//
+// The fix is to put the answer on the screen. Every play already parses the
+// document the site sent back, so the content column of that answer is swapped
+// into the content column of the page you are looking at. The dice roll
+// appears, the reels change, the win message shows - the page visibly moves on
+// every play, exactly as it did when a play was a page load, except that it is
+// a repaint rather than a navigation and so keeps the burst.
+//
+// Only a real content container is ever painted over - td.content, .contentModule
+// or #content. The fallback those selectors end in is document.body, and
+// painting that would wipe the panel along with the page, so the paint is
+// skipped rather than risked when no container is found.
+//
+// innerHTML does not execute <script>, so nothing in the answer runs. These
+// pages are server-rendered HTML and images, so there is nothing in them that
+// needed to.
+//
+// The panel carries two smaller signals for the same reason: a "Last" row
+// counting seconds since the most recent answer, which is proof of life even
+// if a paint is skipped, and a flash of the header's run light on each play.
+// Where an answer states a result it goes in that row's tooltip and the
+// console line.
+//
+// What is still true is that the page is a picture of the last answer, not a
+// live view: the form in it belongs to a play the loop has already moved past,
+// so clicking it yourself starts a play outside the run. It still shows the form it was served with
 // while the server's idea of the game has moved on. Nothing reads the page
 // after that point, so this costs nothing mechanically - but the reels in
 // front of you are not the reels being played, and the button under your mouse
@@ -222,14 +254,29 @@
     SUBMIT_TO_PLAY: true,
 
     // Send the form's request instead of navigating to it, so the plays happen
-    // underneath the page you are on. This is what makes a burst possible at
-    // all - see PLAYING WITHOUT LEAVING THE PAGE above. False goes back to
-    // navigating, which is one play per page load and no bursts.
-    BACKGROUND_PLAYS: true,
+    // underneath the page you are on - see PLAYING WITHOUT LEAVING THE PAGE
+    // above. Off by default: it is faster and it is invisible, and invisible
+    // turned out to be the wrong trade. The run is meant to look like holding
+    // F5 down, so it navigates, and a burst is a run of real page loads.
+    //
+    // True is still there and still measured, for when throughput matters more
+    // than watching it work. It bursts without reloading and reaches about 30
+    // plays a minute against this path's roughly 20.
+    BACKGROUND_PLAYS: false,
 
-    // Plays per round, drawn from this range - the "held F5" part. They go one
-    // at a time, each one's answer read before the next is built. 1 and 1 is
-    // the old behaviour of one play a round.
+    // Paint each answer's content column into the page, so a run visibly moves
+    // instead of sitting motionless while the plays happen underneath it. See
+    // SHOWING THAT IT IS WORKING above. False leaves the page as it was served.
+    PAINT_ANSWERS: true,
+
+    // Plays per round, drawn from this range - the "held F5" part. 1 and 1 is
+    // one play a round.
+    //
+    // When navigating, a round cannot be a loop: each play replaces the
+    // document that would have run it, so the count of plays left in the round
+    // is written to the store and the next page load picks it up and carries
+    // on. That is what makes a round a few seconds of rapid page loads
+    // followed by a pause, rather than one load every few seconds.
     //
     // This is the throughput dial, and it is the right one to turn rather than
     // the delays below: those are shaped to not look like a metronome, and
@@ -321,6 +368,23 @@
       /\bfed up\b/i,
       /\bdoes ?n[o']?t want to play\b/i,
       /\bwon'?t play (?:any ?more|again)\b/i,
+    ],
+
+    // What a play's answer said happened, for the panel's tooltip and the
+    // console line. First match wins and only the matched text is used, so
+    // these want to be narrow.
+    //
+    // Captured live from Dice-A-Roo, whose answer reads "Red Dice-A-Roo Medium
+    // Win Congratulations, you just won 2 Neopoints!". Scorchy Slots' result
+    // wording has not been captured, so a slots run shows the seconds-ago
+    // reading and no result - which is why that reading, and not this, is what
+    // the row actually displays.
+    RESULT_PATTERNS: [
+      /you (?:just )?won [\d,]+ neopoints?/i,
+      /\b(?:small|medium|big|huge|mega|jackpot)\s+win\b/i,
+      /you (?:have )?lost? [\d,]+ neopoints?/i,
+      /better luck next time/i,
+      /\bno win\b/i,
     ],
 
     // Other wordings worth stopping for, which are faults rather than a finished
@@ -476,6 +540,9 @@
     recent: [],          // ms timestamps of recent plays, for the rate ceiling
     note: "",            // why it stopped, shown on the panel after a halt
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
+    burstLeft: 0,        // plays still owed by the current round, across loads
+    lastPlayAt: 0,       // ms of the most recent answer, for the "Last" row
+    lastResult: "",      // what that answer said happened, if anything matched
     lastBored: null,     // {at, count} of the last boredom line, kept across runs
   };
 
@@ -510,6 +577,9 @@
   function halt(note, kind) {
     state.running = false;
     state.nextAt = 0;
+    // A round the run will never finish must not sit in the store, or the next
+    // load would read it as mid-round.
+    state.burstLeft = 0;
     state.note = note;
     state.noteKind = kind || "stop";
     save();
@@ -573,8 +643,10 @@
   // run. Same two lists as the page, in the same order: the boredom line is the
   // point of the run, so it is read before the faults.
   function inspect(doc) {
-    const text = textOf(doc);
+    return inspectText(textOf(doc));
+  }
 
+  function inspectText(text) {
     const bored = checkBored(text);
     if (bored) return { note: `Pet is bored - run complete. ${bored}`, kind: "bored" };
 
@@ -698,6 +770,45 @@
     };
   }
 
+  // Swap the answer's content column into the page's, so the play is visible.
+  // Never paints over document.body or the documentElement: those are the tail
+  // of contentRoot()'s fallback chain, and painting either would take the panel
+  // with it.
+  function paintAnswer(doc) {
+    const from = contentRoot(doc);
+    const into = document.querySelector("td.content")
+      || document.querySelector(".contentModule")
+      || document.querySelector("#content");
+    if (!from || !into) return false;
+    try {
+      // innerHTML does not run <script>; these pages are static HTML and images.
+      into.innerHTML = from.innerHTML;
+      return true;
+    } catch (err) {
+      console.warn(`${TAG} could not paint the answer`, err);
+      return false;
+    }
+  }
+
+  // A visible tick on the run light, for the play you were not watching the
+  // counter for. The class has to come off and the layout be read back before
+  // it goes on again, or the animation does not restart.
+  function flashDot() {
+    const dot = document.getElementById("nprf-dot");
+    if (!dot) return;
+    dot.classList.remove("nprf-flash");
+    void dot.offsetWidth;
+    dot.classList.add("nprf-flash");
+  }
+
+  function extractResult(text) {
+    for (const re of CONFIG.RESULT_PATTERNS) {
+      const m = text.match(re);
+      if (m) return m[0];
+    }
+    return "";
+  }
+
   async function fetchDoc(url, init) {
     const res = await fetch(url, Object.assign(
       { credentials: "same-origin", redirect: "follow" },
@@ -764,14 +875,27 @@
     save();
 
     const got = await fetchDoc(req.url, req.init);
-    console.info(`${TAG} ${game}: play ${state.plays} -> ${got.status}`);
     if (got.status >= 400) {
       return { note: `Stopped: a play answered ${got.status}.`, kind: "stop" };
     }
 
     nextBase = got.url;
     nextForm = entry.playForm(got.doc);
-    return inspect(got.doc);
+
+    // One reading of the answer serves all three things that want it: what it
+    // said happened, what the panel shows, and whether the run is over.
+    const text = textOf(got.doc);
+    state.lastPlayAt = Date.now();
+    state.lastResult = extractResult(text);
+    save();
+    console.info(
+      `${TAG} ${game}: play ${state.plays} -> ${got.status}`
+      + (state.lastResult ? ` (${state.lastResult})` : ""),
+    );
+
+    if (CONFIG.PAINT_ANSWERS) paintAnswer(got.doc);
+    flashDot();
+    return inspectText(text);
   }
 
   // Throw away the form we were holding and ask the server what it currently
@@ -888,6 +1012,13 @@
   function go() {
     state.nextAt = 0;
 
+    // A new round starts here. Mid-round this is already set, by this load or
+    // by the load before it.
+    if (state.burstLeft <= 0) {
+      state.burstLeft = burstSize();
+      console.info(`${TAG} ${game}: round of ${state.burstLeft}`);
+    }
+
     if (CONFIG.SUBMIT_TO_PLAY && CONFIG.BACKGROUND_PLAYS) {
       burst();
       return;
@@ -895,11 +1026,14 @@
 
     if (playBtn && CONFIG.SUBMIT_TO_PLAY) {
       // Counted and charged before the click, because the click navigates and
-      // nothing after it runs.
+      // nothing after it runs. The round's remaining count goes with it, so
+      // the page this lands on knows it is mid-round.
       state.plays += 1;
+      state.burstLeft -= 1;
       state.recent.push(Date.now());
+      state.lastPlayAt = Date.now();
       save();
-      console.info(`${TAG} ${game}: play ${state.plays}`);
+      console.info(`${TAG} ${game}: play ${state.plays}, ${state.burstLeft} left in round`);
       playBtn.click();
       return;
     }
@@ -910,6 +1044,9 @@
       return;
     }
     if (entry.returnUrl) {
+      // Not a play: no count, no charge, and the round keeps whatever it had
+      // left. For Dice-A-Roo this is every other page load, since starting a
+      // game lands on a page that cannot start another.
       save();
       location.replace(entry.returnUrl);
       return;
@@ -931,6 +1068,7 @@
     state.running = true;
     state.count = 0;
     state.plays = 0;
+    state.burstLeft = 0;
     state.startedAt = Date.now();
     state.note = "";
     state.noteKind = "stop";
@@ -1036,6 +1174,13 @@
       background: transparent !important;
     }
     #nprf[data-running="1"] #nprf-dot { background: #fff !important; }
+    /* A tick on the run light per play, for the one you were not watching the
+       counter for. */
+    @keyframes nprf-flash {
+      from { box-shadow: 0 0 0 0 rgba(255,255,255,0.95) !important; }
+      to   { box-shadow: 0 0 0 6px rgba(255,255,255,0) !important; }
+    }
+    #nprf-dot.nprf-flash { animation: nprf-flash 450ms ease-out !important; }
     /* Green header for a finished run - the one state worth seeing from the
        corner of the eye, since it is the state the whole run is for. */
     #nprf[data-outcome="bored"] #nprf-head {
@@ -1149,7 +1294,7 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  let panel, vCount, vNext, elNote, elHistory, btnRun;
+  let panel, vCount, vNext, vLast, elNote, elHistory, btnRun;
 
   // One row of the body: a label that ellipsises and a value that does not move.
   function addRow(parent, label) {
@@ -1190,6 +1335,7 @@
     body.id = "nprf-body";
     vCount = addRow(body, "Plays");
     vNext = addRow(body, "Next");
+    vLast = addRow(body, "Last");
 
     elNote = document.createElement("div");
     elNote.id = "nprf-note";
@@ -1242,6 +1388,18 @@
       startClock();
     } else {
       vNext.textContent = "—";
+    }
+
+    // Seconds since the last play. Proof of life that does not depend on
+    // having watched the counter's previous value, and the one reading that
+    // still works when a page load is what moved things along.
+    if (state.lastPlayAt) {
+      const age = Math.round((Date.now() - state.lastPlayAt) / 1000);
+      vLast.textContent = age < 1 ? "just now" : age < 90 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
+      vLast.title = state.lastResult ? `${state.lastResult} - ${vLast.textContent}` : vLast.textContent;
+    } else {
+      vLast.textContent = "—";
+      vLast.title = "No play yet this run.";
     }
 
     elNote.textContent = state.note || "";
@@ -1365,6 +1523,12 @@
   if (state.running) {
     state.count += 1;
 
+    // What this page says happened, for the panel's "Last" row. A walk-back
+    // page matches nothing and so leaves the previous result standing, which
+    // is what you want: the last thing that actually happened.
+    const landed = extractResult(contentText());
+    if (landed) state.lastResult = landed;
+
     // The boredom line first, before the faults and before the caps: if this
     // load is both the last one and the bored one, it is the bored one.
     const bored = checkBored();
@@ -1373,8 +1537,22 @@
       halt(`Pet is bored - run complete. ${bored}`, "bored");
     } else {
       const why = checkPage() || checkCaps();
-      if (why) halt(why, "stop");
-      else { schedule(); render(); }
+      if (why) {
+        halt(why, "stop");
+      } else if (state.burstLeft > 0) {
+        // Mid-round: this load is one of the rapid ones, so the next step goes
+        // out on the burst gap rather than the between-rounds delay. A direct
+        // timer, not the 1s tick, because the gap is shorter than the tick.
+        const gap = burstGap();
+        state.nextAt = Date.now() + gap;
+        save();
+        render();
+        setTimeout(go, gap);
+      } else {
+        // The round is spent. Pause, then the next go() starts a new one.
+        schedule();
+        render();
+      }
     }
   } else {
     save();
