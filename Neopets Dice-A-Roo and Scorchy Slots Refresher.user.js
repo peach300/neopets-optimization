@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.5
+// @version      2.6
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -1278,17 +1278,19 @@
   }, 1000);
 
   // The countdown is repainted on its own, from requestAnimationFrame, and not
-  // from the interval above. The interval has to keep its period long, because
-  // its job is the due check and a browser throttles a background tab's timers
-  // to about once a minute whatever period you ask for - but a clock showing
-  // tenths and repainted on that same beat moves in visible steps, which is
-  // what made this choppy at 250ms: four repaints a second against a digit
-  // that changes ten times a second.
+  // from the interval above, whose period has to stay long: its job is the due
+  // check, and a browser throttles a background tab's timers to about once a
+  // minute whatever period you ask for. A one-second interval painting a
+  // one-second clock would also drift against it, showing a number that
+  // changes every second or two rather than every second.
   //
   // rAF is the right clock for the display and the wrong one for the due
   // check: it runs at the refresh rate when the tab is visible and stops dead
-  // when it is not. Splitting them gives a smooth countdown in front of you
-  // and a run that still advances behind your back.
+  // when it is not. Splitting them gives a countdown that ticks when it should
+  // in front of you, and a run that still advances behind your back.
+  //
+  // It only writes when the text changes, so painting whole seconds at the
+  // refresh rate costs one assignment a second rather than sixty.
   let frame = 0;
   function paintClock() {
     frame = 0;
@@ -1545,12 +1547,24 @@
     (document.body || document.documentElement).appendChild(panel);
   }
 
-  // Tenths throughout. An earlier version switched to whole seconds above 10s,
-  // which meant the readout changed character partway down a 12-15s pause -
-  // one jump a second, then suddenly ten. One format the whole way is steadier
-  // to watch, and the tabular figures stop the width moving.
+  // Whole seconds, floored, and a dash under one. Tenths were worse to look
+  // at than to reason about: a digit changing ten times a second reads as
+  // activity, and the countdown is the one row where nothing is happening -
+  // the run light and the Last row are what report activity.
+  //
+  // Floored rather than rounded, so the number is seconds actually left and
+  // not seconds nearest. Below a second there is no useful number to show, and
+  // "0s" would sit there as a stopped clock, so it becomes the same dash the
+  // row shows when nothing is due.
+  //
+  // The dash is written as an escape rather than the character itself: this
+  // file is the only thing a userscript manager hands the page, and a copy of
+  // it served or saved as anything but UTF-8 would put mojibake in the panel.
+  // An escape cannot be mangled. It showed up exactly that way on a local test
+  // server that served the script without a charset.
   function fmtSeconds(ms) {
-    return `${Math.max(0, ms / 1000).toFixed(1)}s`;
+    if (!(ms >= 1000)) return "\u2014";
+    return `${Math.floor(ms / 1000)}s`;
   }
 
   function render() {
@@ -1583,7 +1597,7 @@
       vNext.textContent = fmtSeconds(state.nextAt - Date.now());
       startClock();
     } else {
-      vNext.textContent = "—";
+      vNext.textContent = "\u2014";
     }
 
     // Seconds since the last play. Proof of life that does not depend on
@@ -1594,7 +1608,7 @@
       vLast.textContent = age < 1 ? "just now" : age < 90 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
       vLast.title = state.lastResult ? `${state.lastResult} - ${vLast.textContent}` : vLast.textContent;
     } else {
-      vLast.textContent = "—";
+      vLast.textContent = "\u2014";
       vLast.title = "No play yet this run.";
     }
 
