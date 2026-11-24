@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.2
-// @description  Plays Dice-A-Roo or Scorchy Slots on a randomised interval, a few plays to a round, for the pet-boredom mechanic, and stops itself the moment an answer says the pet is bored. Plays are sent as the form's own request without leaving the page, and each costs the game's usual 5 NP; SUBMIT_TO_PLAY false stops it acting.
+// @version      2.3
+// @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
 // @match        *://www.neopets.com/games/play_dicearoo.phtml*
@@ -40,18 +40,58 @@
 //
 // The two games then differ in where the next play lives:
 //
-//   Dice-A-Roo    /games/dicearoo.phtml carries the play form (hidden
-//                 raah=init, "Lets Play! (Costs 5 NP)"). Submitting it lands
-//                 you on /games/play_dicearoo.phtml, which holds the roll
-//                 state and offers no way to start another game - so the loop
-//                 walks back to the landing page and plays again. The walk
-//                 back is a GET of the landing URL, not a reload of the roll
-//                 page: reloading that one re-posts a stale init, which is
-//                 what produces the site's red wrong-place error.
+//   Dice-A-Roo    three POSTs to /games/play_dicearoo.phtml, each found by
+//                 the hidden raah field its form carries:
 //
-//                 Note what this means: each cycle starts a game and then
-//                 abandons it, pot and all, to go back and start another. The
-//                 run is playing for boredom, not for Neopoints.
+//                   raah=init             enter. This is the landing page's
+//                                         "Lets Play! (Costs 5 NP)". It
+//                                         answers with the roll page if a
+//                                         game is already going, and
+//                                         otherwise with a "You are not
+//                                         currently playing" page that
+//                                         carries the next one. It does not
+//                                         itself charge.
+//                   raah=init&type=start  start a game. This is the POST that
+//                                         costs the 5 NP, and it answers with
+//                                         the new game's first roll.
+//                   raah=continue         roll again. Free, and its answer
+//                                         carries another Roll Again, over
+//                                         and over until the game ends.
+//
+//                 So a game is one charge and then free rolls, and a run
+//                 spends nearly all of itself on raah=continue. That is why
+//                 it now stays on play_dicearoo.phtml: the next roll is
+//                 already on the page it is looking at.
+//
+//                 Versions up to 2.2 walked back to /games/dicearoo.phtml
+//                 between every play, on the belief that the roll page
+//                 offered no way to carry on. It offers Roll Again. The walk
+//                 back was both the click-to-play page appearing every few
+//                 seconds and a fresh 5 NP charge per play, and it abandoned
+//                 each pot to go and start another game.
+//
+//                 The one real dead end is Game Over, whose page carries no
+//                 form at all - not one. The run re-enters by building the
+//                 raah=init&type=start POST itself and submitting that,
+//                 since there is nothing on the page to send, which lands a
+//                 fresh game's first roll on the same URL. Measured live from
+//                 a Game Over: 200, a Roll Again form, and the roll's own
+//                 result text. _ref_ck is required on all of these - the same
+//                 POST without it gets the site's red wrong-place error - so
+//                 the token is kept from the last form that carried one, and
+//                 the walk back to the landing page survives only as the
+//                 fallback for having no token to use.
+//
+//                 Deliberately not sent: the roll page's other form, "Stop
+//                 playing and collect N NP" (raah=continue plus type=collect).
+//                 Whether to bank a pot is a decision about the user's
+//                 Neopoints, not something this script should make, so pots
+//                 are still lost when a game ends.
+//
+//                 Nor is play_dicearoo.phtml ever reloaded. A GET of it
+//                 answers with the wrong-place error - measured - so every
+//                 step on that page is a POST, either the page's own form or
+//                 the built one above.
 //
 //   Scorchy Slots /games/slots.phtml serves two pages under one URL, and both
 //                 start a play: the landing form (hidden play=yes, "Click Here
@@ -420,26 +460,60 @@
   //                 not a play - that was the earlier design and it does not
   //                 advance the mechanic - so this form is what gets sent.
   //
-  //   returnUrl     where to go when a run is live and this page has no play
-  //                 button. Dice-A-Roo needs it: starting a game lands you on
-  //                 play_dicearoo.phtml, which has no way to start another, so
-  //                 the loop walks back to the landing page. Scorchy Slots does
-  //                 not: its reels page carries "Play Again", so the next play
-  //                 is always right there.
+  //   restart(tok)  how to re-enter without leaving the page, for a game that
+  //                 can run out of forms. Dice-A-Roo's Game Over page has
+  //                 none, so this is the request its start form would have
+  //                 made, built from the remembered token. Null when there is
+  //                 no token, which sends the run down the returnUrl fallback.
+  //
+  //   returnUrl     where to go when a run is live, the page has no play
+  //                 button, and restart cannot supply one either. For
+  //                 Dice-A-Roo that is the landing page, which hands back both
+  //                 a form and a fresh token. Scorchy Slots never needs it:
+  //                 its reels page carries "Play Again", so the next play is
+  //                 always right there.
   const GAMES = [
     {
       name: "Dice-A-Roo",
       title: /dice\s*-?\s*a\s*-?\s*roo/i,
-      // Only on the landing page, found by the hidden field its form posts.
-      // Never on play_dicearoo.phtml, which holds the roll state.
+      // Roll Again first, wherever it is offered: it is free, it keeps the
+      // pot, and it is on the page the run is already looking at. Only when
+      // there is no roll to make does this fall back to an entry form - the
+      // "You are not currently playing" page's start button, or the landing
+      // page's "Lets Play!".
+      //
+      // The collect form has to be excluded by hand, because it carries the
+      // same raah=continue as Roll Again and differs only by type=collect.
+      // Matching it would bank the pot and end the game, which is both a
+      // money decision and the opposite of carrying on.
       playForm: (doc) => {
-        const marker = doc.querySelector('input[name="raah"][value="init"]');
-        return marker ? marker.form : null;
+        for (const marker of doc.querySelectorAll('input[name="raah"][value="continue"]')) {
+          const form = marker.form;
+          if (form && !form.querySelector('input[name="type"][value="collect"]')) return form;
+        }
+        const init = doc.querySelector('input[name="raah"][value="init"]');
+        return init ? init.form : null;
       },
-      // A fresh GET of the landing page. Walking back this way rather than
-      // reloading matters: play_dicearoo.phtml is a POST result, and reloading
-      // it re-posts a stale init, which is what gets you the site's red
-      // wrong-place error.
+      // Which of this game's forms costs money. Only entering does: a roll is
+      // free, so a long run is charged per game and not per play, and the
+      // panel would otherwise report a bill five times the real one.
+      //
+      // It can overcount by one per run, and only at the first play: raah=init
+      // sent while a game is already in progress answers with that game's roll
+      // page without charging. Hence "about" on the panel's figure.
+      entryForm: (form) => !!form
+        && !!form.querySelector('input[name="raah"][value="init"]'),
+      // Game Over leaves nothing to submit, so re-entry is this request,
+      // built. It starts a game, so it costs the 5 NP and counts as a play.
+      restart: (token) => (token
+        ? {
+          url: "/games/play_dicearoo.phtml",
+          fields: { raah: "init", type: "start", _ref_ck: token },
+        }
+        : null),
+      // The fallback for having no token: a fresh GET of the landing page,
+      // which carries one. A GET rather than a reload of the roll page, which
+      // answers the wrong-place error.
       returnUrl: "/games/dicearoo.phtml",
       // Where to GET to find out what the server currently thinks, after a
       // send fails. The same page for this game; Scorchy Slots differs.
@@ -458,6 +532,10 @@
         if (marker && marker.form) return marker.form;
         return doc.querySelector('form[action*="process_slots"]');
       },
+      // Every slots play is a fresh 5 NP spin, landing form or reels alike.
+      entryForm: () => true,
+      // Never needed: slots.phtml always answers with a form that plays.
+      restart: () => null,
       returnUrl: null,
       // No walk back is needed mid-run, but a resync after a failed send still
       // has somewhere to look: slots.phtml serves the reels while a game is in
@@ -472,6 +550,15 @@
   // drops and which Neopets forms sometimes dispatch on.
   function submitOf(form) {
     return form.querySelector('input[type="submit"], button[type="submit"], button:not([type])');
+  }
+
+  // The hidden request token Neopets puts on its forms. Every form on a live
+  // page carries the same one, and it is required on each play - a POST
+  // without it answers the wrong-place error, measured - so the run keeps the
+  // last one it saw for the one page that has no form to read it from.
+  function tokenIn(doc) {
+    const el = doc.querySelector('input[name="_ref_ck"]');
+    return el ? el.value : "";
   }
 
   const entry = GAMES.find((g) => g.title.test(document.title || ""));
@@ -544,6 +631,8 @@
     lastPlayAt: 0,       // ms of the most recent answer, for the "Last" row
     lastResult: "",      // what that answer said happened, if anything matched
     lastBored: null,     // {at, count} of the last boredom line, kept across runs
+    token: "",           // last _ref_ck seen, for re-entering a dead-end page
+    games: 0,            // games started this run, which is what was charged
   };
 
   function load() {
@@ -569,6 +658,20 @@
   }
 
   const state = load();
+
+  // Whatever this page can tell us. Kept rather than read on demand because
+  // the page that needs it - Dice-A-Roo's Game Over - is the one page with no
+  // form on it to read.
+  {
+    const here = tokenIn(document);
+    if (here && here !== state.token) state.token = here;
+  }
+
+  // The built request that re-enters a game, or null if this game never needs
+  // one or there is no token to sign it with.
+  function restartPlan() {
+    return entry.restart ? entry.restart(state.token || "") : null;
+  }
 
   // ------------------------------------------------------------------ the halt
 
@@ -846,31 +949,47 @@
   // One play, end to end: find a form if the last answer had none, send it,
   // read what came back. Returns null to carry on, or the reason to stop.
   async function playOnce() {
-    if (!nextForm) {
-      // Dice-A-Roo: the answer to a play is the roll page, which carries no way
-      // to start another, so walk back to the landing page for a fresh form.
-      // The same walk back the navigating version did, as a request.
-      if (!entry.returnUrl) {
-        return { note: "Stopped: nothing offers another play.", kind: "stop" };
-      }
+    const plan = nextForm ? null : restartPlan();
+    let req = null;
+
+    if (nextForm) {
+      req = requestFor(nextForm, nextBase);
+    } else if (plan) {
+      // The answer ran out of forms - Dice-A-Roo's Game Over - so send the
+      // request its start form would have made.
+      req = {
+        url: resolve(plan.url, location.href),
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(plan.fields).toString(),
+        },
+      };
+    } else if (entry.returnUrl) {
+      // No token to build that request with, so walk back to the landing page,
+      // which answers with both a form and a token.
       const back = await fetchDoc(resolve(entry.returnUrl, location.href), { method: "GET" });
       if (back.status >= 400) {
         return { note: `Stopped: the landing page answered ${back.status}.`, kind: "stop" };
       }
       const said = inspect(back.doc);
       if (said) return said;
+      const tok = tokenIn(back.doc);
+      if (tok) state.token = tok;
       nextForm = entry.playForm(back.doc);
       nextBase = back.url;
       if (!nextForm) {
         return { note: "Stopped: the landing page came back with no play form.", kind: "stop" };
       }
+      req = requestFor(nextForm, nextBase);
+    } else {
+      return { note: "Stopped: nothing offers another play.", kind: "stop" };
     }
-
-    const req = requestFor(nextForm, nextBase);
 
     // Counted before the request, not after: a play that was sent counts
     // whether or not its answer arrives, and the cost is incurred either way.
     state.plays += 1;
+    if (plan || (entry.entryForm && entry.entryForm(nextForm))) state.games += 1;
     state.recent.push(Date.now());
     save();
 
@@ -881,6 +1000,8 @@
 
     nextBase = got.url;
     nextForm = entry.playForm(got.doc);
+    const tok = tokenIn(got.doc);
+    if (tok) state.token = tok;
 
     // One reading of the answer serves all three things that want it: what it
     // said happened, what the panel shows, and whether the run is over.
@@ -995,14 +1116,41 @@
     }
   }
 
-  // One step of the loop. Four shapes, in order of what is available:
+  // A navigation that posts fields this page has no form for. Dice-A-Roo's
+  // Game Over page is form-less, so re-entering it means building the request
+  // its start form would have made. Submitted rather than fetched, because the
+  // whole point of this path is that the page visibly moves.
+  //
+  // This is the one step that cannot use location.replace - a POST needs a
+  // form - so it leaves a history entry behind. Once per game rather than
+  // once per play, which is what the old walk back cost.
+  function postNav(plan) {
+    const form = document.createElement("form");
+    form.method = "post";
+    form.action = plan.url;
+    for (const name of Object.keys(plan.fields)) {
+      const field = document.createElement("input");
+      field.type = "hidden";
+      field.name = name;
+      field.value = plan.fields[name];
+      form.appendChild(field);
+    }
+    form.hidden = true;
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  // One step of the loop. Five shapes, in order of what is available:
   //
   //   background      send the round's plays as requests, leaving the page
   //                   alone. The default, and the only shape that can do more
   //                   than one play, since the others navigate.
   //   a play button   click it. This is the play, and it is the last thing this
   //                   document does.
-  //   a return URL    walk back to the page that has one. Not a play, not
+  //   a restart plan  the page ran out of forms, so post the request that
+  //                   starts a fresh game. A play: counted and charged.
+  //   a return URL    walk back to the page that has one, when there is no
+  //                   token to build that request with. Not a play, not
   //                   counted, and not charged.
   //   neither         should not happen - canAct gates it - so say so loudly
   //                   rather than spinning.
@@ -1030,6 +1178,7 @@
       // the page this lands on knows it is mid-round.
       state.plays += 1;
       state.burstLeft -= 1;
+      if (entry.entryForm && entry.entryForm(pageForm)) state.games += 1;
       state.recent.push(Date.now());
       state.lastPlayAt = Date.now();
       save();
@@ -1043,10 +1192,24 @@
       location.replace(location.href);
       return;
     }
+    const plan = restartPlan();
+    if (plan && CONFIG.SUBMIT_TO_PLAY) {
+      // Game Over, with a token to re-enter on. This starts a game, so it is
+      // charged and counted exactly like a roll.
+      state.plays += 1;
+      state.burstLeft -= 1;
+      state.games += 1;
+      state.recent.push(Date.now());
+      state.lastPlayAt = Date.now();
+      save();
+      console.info(`${TAG} ${game}: new game, play ${state.plays}`);
+      postNav(plan);
+      return;
+    }
     if (entry.returnUrl) {
       // Not a play: no count, no charge, and the round keeps whatever it had
-      // left. For Dice-A-Roo this is every other page load, since starting a
-      // game lands on a page that cannot start another.
+      // left. Only reached now when there is no token to re-enter with, since
+      // the roll page carries the next roll itself.
       save();
       location.replace(entry.returnUrl);
       return;
@@ -1068,6 +1231,7 @@
     state.running = true;
     state.count = 0;
     state.plays = 0;
+    state.games = 0;
     state.burstLeft = 0;
     state.startedAt = Date.now();
     state.note = "";
@@ -1377,7 +1541,11 @@
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
     vCount.textContent = `${state.plays} / ${CONFIG.MAX_REFRESHES}`;
-    vCount.title = `${state.plays} plays this run, cap ${CONFIG.MAX_REFRESHES}`;
+    // The bill, not the play count: Dice-A-Roo charges per game and rolls for
+    // free, so plays times 5 NP would overstate what the run has spent.
+    vCount.title = `${state.plays} plays this run, cap ${CONFIG.MAX_REFRESHES}`
+      + ` - ${state.games} game${state.games === 1 ? "" : "s"} started,`
+      + ` about ${state.games * 5} NP`;
 
     if (state.running && busy) {
       // Mid-round. There is no countdown to show, because the plays are in
