@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.7
+// @version      2.8
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -224,11 +224,17 @@
 //
 // HOW IT KNOWS THE PET IS BORED
 //
-// The boredom line is the point of the run, so it is checked before the faults
-// and before the clock: if a play both runs the time out and comes back bored,
-// it is the bored one. Matching it ends the run as a success - green header,
-// "run complete", and the play count recorded, which is now the only number
-// anyone has for how long this actually takes.
+// The boredom line is the point of the run, so it is checked before anything
+// else that could end one: if a play both looks like a fault and comes back
+// bored, it is the bored one. Matching it ends the run as a success - green
+// header, and the panel says "done" and nothing else. The wording it matched
+// goes to the console, where it is wanted when a pattern needs checking and
+// not when a run has simply finished.
+//
+// How long that takes, measured once on the live site: 390 plays of
+// Dice-A-Roo. Reported from a real run rather than measured here, but it is
+// the only figure anyone has, and it settles the caps that used to be in this
+// file - 150 would never have reached it and 400 only just.
 //
 // A captured bored page says where that line lives. It is served at
 // /games/play_dicearoo.phtml, carries the game's own title, and its content
@@ -652,7 +658,6 @@
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
     burstLeft: 0,        // plays still owed by the current round, across loads
     lastResult: "",      // what the last answer said happened, for the console
-    lastBored: null,     // {at, count} of the last boredom line, kept across runs
     token: "",           // last _ref_ck seen, for re-entering a dead-end page
     games: 0,            // games started this run, which is what was charged
   };
@@ -773,7 +778,13 @@
 
   function inspectText(text) {
     const bored = checkBored(text);
-    if (bored) return { note: `Pet is bored - run complete. ${bored}`, kind: "bored" };
+    // "done" and nothing more: a finished run is the expected ending, and the
+    // panel saying so in one word is the whole message. What the page actually
+    // said goes to the console for the times a pattern needs checking.
+    if (bored) {
+      console.info(`${TAG} ${game}: bored - ${bored}`);
+      return { note: "done", kind: "bored" };
+    }
 
     for (const re of CONFIG.HALT_PATTERNS) {
       const m = text.match(re);
@@ -1099,7 +1110,6 @@
           }
           const back = await resync();
           if (back.said) {
-            if (back.said.kind === "bored") state.lastBored = { at: Date.now(), count: state.plays };
             halt(back.said.note, back.said.kind);
             return;
           }
@@ -1114,7 +1124,6 @@
         }
 
         if (said) {
-          if (said.kind === "bored") state.lastBored = { at: Date.now(), count: state.plays };
           halt(said.note, said.kind);
           return;
         }
@@ -1241,7 +1250,8 @@
     // in the script rather than the state of the pet.
     const already = checkBored();
     if (already) {
-      state.note = `Already bored - nothing to do. ${already}`;
+      console.info(`${TAG} ${game}: already bored - ${already}`);
+      state.note = "done";
       state.noteKind = "bored";
       save();
       render();
@@ -1411,10 +1421,6 @@
     }
     #nprf[data-outcome="bored"] #nprf-note { color: #156141 !important; font-weight: bold !important; }
     #nprf[data-outcome="info"] #nprf-note { color: #4a5a6a !important; }
-    #nprf-history {
-      margin-top: 3px !important;
-      font: 10px/1.35 ${MUSEO} !important; color: #6a7a8c !important;
-    }
     /* Hide with the [hidden] attribute, not an inline style.display: the rules
        here carry !important, and an author !important declaration beats an
        inline one, so style.display = "none" on any element whose rule gains a
@@ -1479,7 +1485,7 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  let panel, vCount, vNext, elNote, elHistory, btnRun;
+  let panel, vCount, vNext, elNote, btnRun;
 
   // One row of the body: a label that ellipsises and a value that does not move.
   function addRow(parent, label) {
@@ -1524,11 +1530,6 @@
     elNote = document.createElement("div");
     elNote.id = "nprf-note";
     body.appendChild(elNote);
-
-    elHistory = document.createElement("div");
-    elHistory.id = "nprf-history";
-    elHistory.hidden = true;
-    body.appendChild(elHistory);
 
     const buttons = document.createElement("div");
     buttons.id = "nprf-buttons";
@@ -1599,16 +1600,6 @@
     elNote.textContent = state.note || "";
     elNote.hidden = !state.note;
 
-    if (state.lastBored && !state.running) {
-      const ago = Math.round((Date.now() - state.lastBored.at) / 60000);
-      elHistory.textContent =
-        `Last bored after ${state.lastBored.count} plays, `
-        + (ago < 1 ? "just now" : ago < 60 ? `${ago} min ago` : `${Math.round(ago / 60)}h ago`);
-      elHistory.hidden = false;
-    } else {
-      elHistory.hidden = true;
-    }
-
     btnRun.textContent = state.running ? "Stop" : "Start";
     btnRun.disabled = standDown && !state.running;
     btnRun.title = btnRun.disabled
@@ -1636,13 +1627,12 @@
     // outcome the run exists to reach, on the page that states it.
     const bored = checkBored();
     if (bored) {
-      if (state.running) state.lastBored = { at: Date.now(), count: state.plays };
       state.running = false;
       state.nextAt = 0;
-      state.note = `Pet is bored - run complete. ${bored}`;
+      state.note = "done";
       state.noteKind = "bored";
       save();
-      console.info(`${TAG} ${game}: ${state.note}`);
+      console.info(`${TAG} ${game}: bored - ${bored}`);
       render();
       return;
     }
@@ -1727,8 +1717,8 @@
     // load is both the last one and the bored one, it is the bored one.
     const bored = checkBored();
     if (bored) {
-      state.lastBored = { at: Date.now(), count: state.plays };
-      halt(`Pet is bored - run complete. ${bored}`, "bored");
+      console.info(`${TAG} ${game}: bored - ${bored}`);
+      halt("done", "bored");
     } else {
       const why = checkPage() || checkCaps();
       if (why) {
