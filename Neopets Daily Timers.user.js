@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.2
+// @version      1.3
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -496,11 +496,12 @@
       bypass: "https://www.neopets.com/halloween/process_corkgun.phtml",
       bypassPath: "/halloween/process_corkgun.phtml",
       note: "20 shots a day.",
-      // A guess, unlike the two above: this one's refusal has never been
-      // seen. It is built from theirs, which are the only examples there
-      // are. If a cork gun run never stands itself down, read the handler's
-      // answer and put its wording here.
-      spent: /no[+\s]more[+\s](?:shots|corks|goes|plays)|had[+\s]yer[+\s]lot|somebody[+\s]else[+\s]play/i,
+      // Captured like the other two, and the plainest of the three:
+      //   totalnp=560786&success=99&error=No+more+shots+today.
+      // Note the success=99 - not the 0 the other two send - which is why
+      // the wording is what stands this row down and the success field is
+      // only ever used to avoid counting a play that did not happen.
+      spent: /no[+\s]more[+\s]shots[+\s]today/i,
     },
     {
       id: "bagatelle",

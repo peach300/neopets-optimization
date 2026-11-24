@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         # Neopets Lottery Ticket Autobuy
 // @namespace    local-advisor-fork
-// @version      1.2
-// @description  Fills the Neopian Lottery ticket with 6 unique random numbers and, after a cancellable countdown, submits the buy itself. Successor to the Lottery Ticket Randomizer, which filled the boxes and left the click to you.
+// @version      2.0
+// @description  Fills the Neopian Lottery ticket with 6 unique random numbers and, once you start a run, buys ticket after ticket up to the day's limit of 20 - each one behind a cancellable countdown. Successor to the Lottery Ticket Randomizer, which filled the boxes and left the click to you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/lottery.phtml*
+// @match        *://neopets.com/games/lottery.phtml*
 // @grant        none
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/peach300/neopets-optimization/main/Neopets%20Lottery%20Ticket%20Autobuy.user.js
@@ -18,21 +19,38 @@
 // The numbers are irrelevant to the outcome - a uniform draw over 1-30 does not
 // care which set you hold - so the click carries no decision. This script takes it.
 //
+// A DAY IS TWENTY TICKETS
+//
+// Twenty is not a setting in this file. It is the lottery's own limit, per
+// account per day, and the site refuses the twenty-first whatever any script
+// believes - so DAILY_LIMIT is a constant beside the code that reads it rather
+// than a number in the config block, where it would look like a dial you could
+// turn.
+//
+// That limit is also what makes this a run rather than a one-shot. Twenty
+// tickets is twenty page loads of filling six boxes and clicking the same
+// button, which is exactly the shape of work worth handing over. So the panel
+// carries the same control as the Refresher in this folder: Start, Stop, and a
+// Resume that keeps the count - and once the twenty are gone the button greys
+// out and reads Done, because the day really is over and a button offering to
+// start another would be a lie.
+//
+// Stop is a pause, as it is there: the tickets you have already bought stay
+// counted, because the count is against the day and not against the run.
+//
 // SCOPE
 //
-// This one acts: it spends NP (20 per ticket) and submits a form with no human
-// in the loop. AUTO_BUY is the whole of that; set it to false and you are back
-// to the old randomizer's behaviour, filling the boxes and leaving the click to
-// you.
+// This one acts: it spends NP (20 per ticket, so 400 for a full day) and
+// submits a form with no human in the loop. Nothing happens until you press
+// Start, and the bounds on a forgotten tab are:
 //
-// The guards below exist because an autobuyer's failure mode is a refresh loop
-// quietly draining NP:
-//
-//   - A countdown with a Cancel button, so any page load can be aborted by hand.
-//   - A per-day ticket cap, counted in localStorage against the NST date, so a
-//     reload (or a tab restored by the browser) cannot buy past the cap.
+//   - The day's twenty, counted in localStorage against the NST date, so a
+//     reload (or a tab restored by the browser) cannot buy past it.
+//   - A countdown with the Stop button live throughout, so any individual buy
+//     can still be caught by hand.
 //   - It submits only on a page that actually has the buy form. The post-buy
-//     confirmation page has no form, so a successful buy cannot re-trigger.
+//     confirmation page has none, so a successful buy cannot re-trigger; a run
+//     walks back to the ticket page instead, after a pause.
 //   - One submit per page load, latched, regardless of what else fires.
 //
 // HOW the submit is done
@@ -48,32 +66,38 @@
   "use strict";
 
   const CONFIG = {
-    // The only setting that matters. false = fill the boxes and stop (old behaviour).
-    AUTO_BUY: true,
-    // Seconds of countdown before the buy, during which Cancel aborts it.
+    // Seconds of countdown before each buy, with Stop live throughout.
     // 0 submits immediately; keep a few seconds unless you know you want none.
     DELAY_SECONDS: 5,
-    // Hard ceiling on tickets bought per NST day by this script. Tickets cost
-    // 20 NP each. The cap is the backstop against a reload loop.
-    MAX_TICKETS_PER_DAY: 1,
+    // How long to wait on the page a buy lands on before walking back for the
+    // next ticket, drawn from this range. A run is a person buying twenty
+    // tickets, and a person does not do it on a metronome.
+    BETWEEN_MIN_SECONDS: 2,
+    BETWEEN_MAX_SECONDS: 6,
     // Sort the six numbers ascending (easier to eyeball against past tickets).
     SORT: true,
-    BADGE: true,
   };
 
+  // The lottery's own limit: twenty tickets per account per day. Not a setting.
+  // The site refuses the twenty-first regardless of what this file says, so a
+  // bigger number here would buy nothing and report a run that never finished.
+  const DAILY_LIMIT = 20;
+
   const TAG = "[Lottery Autobuy]";
-  const STORE_KEY = "lotteryAutobuy.count";
+  const STORE_KEY = "lotteryAutobuy.state";
+  const LEGACY_KEY = "lotteryAutobuy.count";
   const FIELDS = ["one", "two", "three", "four", "five", "six"];
   const MIN = 1;
   const MAX = 30;
+  const TICKET_URL = "/games/lottery.phtml";
 
   let submitted = false;
 
   // ------------------------------------------------------------------ the day
 
   // Neopets days turn over at midnight NST, which is America/Los_Angeles. Counting
-  // against the local date would let a late-evening reload buy a second ticket on
-  // the same Neopets day (or refuse one on a new day).
+  // against the local date would let a late-evening reload buy a twenty-first
+  // ticket on the same Neopets day (or refuse one on a new day).
   function nstDate() {
     try {
       return new Intl.DateTimeFormat("en-CA", {
@@ -85,26 +109,69 @@
     }
   }
 
-  function boughtToday() {
+  // ---------------------------------------------------------------- the store
+
+  const BLANK = {
+    date: "",            // the NST day `bought` belongs to
+    bought: 0,           // tickets this script has bought today
+    running: false,      // is a run going
+  };
+
+  function load() {
+    let raw = {};
     try {
-      const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
-      return raw.date === nstDate() ? (raw.count | 0) : 0;
+      raw = JSON.parse(localStorage.getItem(STORE_KEY) || "{}") || {};
     } catch {
-      // A broken or blocked store must not read as "nothing bought yet", or the
-      // cap stops being a cap. Claim the cap is reached and buy nothing.
-      return CONFIG.MAX_TICKETS_PER_DAY;
+      // A broken store must not read as "nothing bought yet", or the day's
+      // limit stops being a limit. Claim the day is spent and buy nothing.
+      return { ...BLANK, date: nstDate(), bought: DAILY_LIMIT };
+    }
+    // The first version counted under its own key, as {date, count}. Carry it
+    // over so an upgrade mid-day does not hand you back tickets you have spent.
+    if (!raw.date) {
+      try {
+        const old = JSON.parse(localStorage.getItem(LEGACY_KEY) || "{}") || {};
+        if (old.date) raw = { date: old.date, bought: old.count | 0 };
+      } catch {
+        /* nothing to carry over */
+      }
+    }
+    const state = { ...BLANK, ...raw };
+    // A new NST day: the count goes, and a run that was going carries on into
+    // the new day with a fresh twenty rather than stopping at midnight.
+    if (state.date !== nstDate()) {
+      state.date = nstDate();
+      state.bought = 0;
+    }
+    return state;
+  }
+
+  const state = load();
+
+  function save() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    } catch (err) {
+      // If the count cannot be written, the day's limit cannot be held across
+      // page loads, so the run stops rather than becoming unbounded.
+      console.warn(`${TAG} cannot persist the count; stopping`, err);
+      state.running = false;
     }
   }
 
+  function spent() {
+    return state.bought >= DAILY_LIMIT;
+  }
+
+  // Is there a day to pick up, as opposed to one to begin? Drives the button's
+  // word, so that Start and Resume are not one label doing two jobs.
+  function resumable() {
+    return !state.running && state.bought > 0 && !spent();
+  }
+
   function recordBuy() {
-    try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({
-        date: nstDate(),
-        count: boughtToday() + 1,
-      }));
-    } catch (err) {
-      console.warn(`${TAG} could not record the buy; cap may not hold`, err);
-    }
+    state.bought += 1;
+    save();
   }
 
   // --------------------------------------------------------------- the numbers
@@ -116,6 +183,12 @@
       if (!nums.includes(n)) nums.push(n);
     }
     return CONFIG.SORT ? nums.sort((a, b) => a - b) : nums;
+  }
+
+  function between() {
+    const lo = Math.max(0, CONFIG.BETWEEN_MIN_SECONDS);
+    const hi = Math.max(lo, CONFIG.BETWEEN_MAX_SECONDS);
+    return Math.round((lo + Math.random() * (hi - lo)) * 1000);
   }
 
   // ------------------------------------------------------------------ the form
@@ -155,8 +228,8 @@
     submitted = true;
     recordBuy();          // recorded before navigating; the page is about to go away
     const btn = buyButton(form);
+    console.info(`${TAG} buying ticket ${state.bought} of ${DAILY_LIMIT}`);
     if (btn) {
-      console.info(`${TAG} submitting via button`, btn.value || btn.textContent);
       btn.click();
     } else {
       console.info(`${TAG} no submit button found; falling back to form.submit()`);
@@ -164,18 +237,16 @@
     }
   }
 
-  // ------------------------------------------------------------------ the badge
+  // ------------------------------------------------------------------ the panel
   //
   // House style, per .claude/skills/neopets-panel-style: the site's own two
   // fonts from images.neopets.com, the #2367B5 header, Meridell green once the
-  // buy has gone in, and the Safety Deposit Box's yellow button for Cancel.
-  // 150px because the site's content column is 1000px and centred, so at that
-  // width the badge sits in the window's margin rather than over the page.
+  // day is spent, and the Safety Deposit Box's yellow button.
   //
   // The countdown gets tabular monospace for the usual reason and one specific
   // to this script: it is the clock on an irreversible spend, it reads down
   // through single digits, and a readout that reflows the panel every second
-  // under the cursor is the last thing wanted above a Cancel button.
+  // under the cursor is the last thing wanted above a Stop button.
 
   const FONT_HOST = "https://images.neopets.com/js/fonts";
   const CAFETERIA = '"NPLB Cafeteria", "Cafeteria", "Arial Bold", sans-serif';
@@ -193,25 +264,54 @@
     }
     #nplb {
       box-sizing: border-box !important;
-      position: fixed !important; bottom: 20px !important; right: 18px !important;
+      position: fixed !important; bottom: 25px !important; right: 23px !important;
       z-index: 2147483647 !important;
-      width: 150px !important; text-align: left !important;
+      /* Wide enough for the worst line of numbers it can draw: six two-digit
+         picks and five ", " separators is 22 characters, which at 10.5px in
+         this monospace stack needs about 150px of inner width - measured, not
+         guessed. 150px of panel did not have it and the line wrapped to two,
+         so the panel grew rather than the figures shrinking: the numbers are
+         what it is for. 172 leaves a few pixels over the measured worst case,
+         because the stack falls through to whatever monospace the machine
+         has and they are not all the same width. */
+      width: 172px !important; text-align: left !important;
       font: 12px/1.45 ${MUSEO} !important; color: #333 !important;
+      /* Every inherited text property the page could be setting, restated.
+         Neopets' older pages carry "body { text-align: center }", which
+         inherits into anything appended to the body; text-align was already
+         here for that reason, and the rest are the same bug waiting for a
+         theme that sets them. */
+      direction: ltr !important;
+      letter-spacing: normal !important; word-spacing: normal !important;
+      text-indent: 0 !important; text-transform: none !important;
+      text-shadow: none !important; white-space: normal !important;
       border: 1px solid #27486d !important; border-radius: 10px !important;
       overflow: hidden !important; background: #fff !important;
       box-shadow: 0 2px 7px rgba(0,0,0,0.3) !important;
     }
     #nplb * { box-sizing: border-box !important; }
     #nplb-head {
-      padding: 4px 8px !important;
+      display: flex !important; align-items: center !important;
+      gap: 6px !important; padding: 4px 8px !important;
       background: linear-gradient(#5b9bd9, #2367B5) !important;
       border-bottom: 1px solid #27486d !important;
       color: #fff !important; font: 13pt/1.1 ${CAFETERIA} !important;
-      white-space: nowrap !important; overflow: hidden !important;
-      text-overflow: ellipsis !important; user-select: none !important;
+      user-select: none !important;
     }
-    /* Green only once the buy has actually gone in. A countdown toward spending
-       NP is not a success yet, so it stays blue while Cancel still means
+    #nplb-title {
+      flex: 1 1 auto !important; white-space: nowrap !important;
+      overflow: hidden !important; text-overflow: ellipsis !important;
+    }
+    /* The run light, as on the Refresher: filled while a run is going, hollow
+       while it is not. */
+    #nplb-dot {
+      flex: none !important; width: 8px !important; height: 8px !important;
+      border-radius: 50% !important; border: 1px solid #fff !important;
+      background: transparent !important;
+    }
+    #nplb[data-running="1"] #nplb-dot { background: #fff !important; }
+    /* Green only once the day's twenty are gone. A countdown toward spending
+       NP is not a success yet, so it stays blue while Stop still means
        something. */
     #nplb[data-kind="done"] #nplb-head {
       background: linear-gradient(#2fa86f, #1d774f) !important;
@@ -224,17 +324,18 @@
     #nplb-label {
       color: #4a5a6a !important; font: 10.5px/1.5 ${MUSEO} !important;
     }
-    /* The six numbers, on their own line: at 10.5px monospace "1, 4, 9, 12, 20,
-       28" is about 120px, which fits the 134px of inner width, and a label
-       beside it would not. */
+    /* The six numbers, on their own line and never wrapped: see the width note
+       above. nowrap rather than a shrinking font, so a wrap shows up as an
+       overflow during testing instead of quietly reflowing the panel. */
     #nplb-nums {
       padding-bottom: 2px !important; color: #1b4f85 !important;
+      white-space: nowrap !important;
       font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas,
             "DejaVu Sans Mono", monospace !important;
       font-variant-numeric: tabular-nums !important;
       font-feature-settings: "tnum" 1 !important;
     }
-    #nplb-count {
+    .nplb-row {
       display: flex !important; align-items: baseline !important; gap: 6px !important;
       padding: 2px 0 !important; border-top: 1px solid #dce8f6 !important;
     }
@@ -242,16 +343,16 @@
        style.display, because the rules above carry !important and an author
        !important declaration beats an inline one. The first cut set
        style.display = "none" and the empty "Buying in" row stayed on screen on
-       every badge that has no countdown. This is the cost of the
+       every panel that has no countdown. This is the cost of the
        !important-everything rule the site forces, and it applies to every
        show/hide in these panels. */
     #nplb [hidden] { display: none !important; }
-    #nplb-count .k {
+    .nplb-row .k {
       flex: 1 1 auto !important; color: #4a5a6a !important;
       font: 10.5px/1.5 ${MUSEO} !important;
     }
-    #nplb-count .v {
-      flex: none !important; min-width: 34px !important; text-align: right !important;
+    .nplb-row .v {
+      flex: none !important; min-width: 44px !important; text-align: right !important;
       color: #1b4f85 !important;
       font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas,
             "DejaVu Sans Mono", monospace !important;
@@ -268,7 +369,7 @@
     /* The Safety Deposit Box's "Remove 1": template.css .button-default__2020 +
        .button-yellow__2020 plus safetydeposit.css .sdb-remove1, copied
        declaration for declaration. */
-    #nplb-cancel {
+    #nplb-btn {
       display: block !important; width: 100% !important;
       margin: 7px 0 0 !important; padding: 3px 10px 7px !important;
       cursor: pointer !important; position: relative !important;
@@ -282,19 +383,28 @@
                   inset 0 2px 0 1px rgba(253,249,220,1),
                   0 0 0 2px rgba(0,0,0,1) !important;
     }
-    #nplb-cancel:hover, #nplb-cancel:focus {
+    #nplb-btn:hover, #nplb-btn:focus {
       background: linear-gradient(#ffff54, #ffd328) !important;
       box-shadow: inset 0 0 0 1px rgba(255,255,84,1),
                   inset 0 -3px 2px 3px rgba(234,143,9,1),
                   inset 0 2px 0 1px rgba(255,255,243,1),
                   0 0 0 2px rgba(0,0,0,1) !important;
     }
-    #nplb-cancel:active {
+    #nplb-btn:active {
       background: linear-gradient(#ebb233, #f6e250) !important;
       box-shadow: inset 0 0 0 1px rgba(235,178,51,1),
                   inset 0 -1px 2px 3px rgba(196,124,25,1),
                   inset 0 2px 0 1px rgba(253,249,220,1),
                   0 0 0 2px rgba(0,0,0,1) !important;
+    }
+    /* Done. Flat, since the bevel above is what makes the button read as
+       pressable, and the day's twenty are not pressable. */
+    #nplb-btn:disabled {
+      cursor: not-allowed !important; color: #7b7b7b !important;
+      background: linear-gradient(#efefef, #dcdcdc) !important;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,1),
+                  inset 0 -2px 2px 2px rgba(0,0,0,0.07),
+                  0 0 0 2px rgba(0,0,0,0.45) !important;
     }
   `;
 
@@ -306,19 +416,46 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  // Carries the Cancel control, so it is not optional when a buy is pending.
-  // onCancel null means there is nothing to cancel.
-  function makeBadge({ nums, note, kind, onCancel }) {
+  let panel = null;
+  let elNums = null;
+  let vCount = null;
+  let rowClock = null;
+  let vClock = null;
+  let elNote = null;
+  let btn = null;
+
+  function addRow(parent, label) {
+    const row = document.createElement("div");
+    row.className = "nplb-row";
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = label;
+    const v = document.createElement("span");
+    v.className = "v";
+    row.appendChild(k);
+    row.appendChild(v);
+    parent.appendChild(row);
+    return { row, v };
+  }
+
+  function build() {
     injectStyles();
 
-    const el = document.createElement("div");
-    el.id = "nplb";
-    el.dataset.kind = kind || "info";
+    panel = document.createElement("div");
+    panel.id = "nplb";
 
     const head = document.createElement("div");
     head.id = "nplb-head";
-    head.textContent = "Lottery ticket";
-    el.appendChild(head);
+    const dot = document.createElement("span");
+    dot.id = "nplb-dot";
+    const title = document.createElement("span");
+    title.id = "nplb-title";
+    // The game's name, not the script's: on the page it is on, the script is
+    // not the thing in doubt.
+    title.textContent = "Neopian Lottery";
+    head.appendChild(dot);
+    head.appendChild(title);
+    panel.appendChild(head);
 
     const body = document.createElement("div");
     body.id = "nplb-body";
@@ -328,144 +465,171 @@
     label.textContent = "Filled";
     body.appendChild(label);
 
-    const elNums = document.createElement("div");
+    elNums = document.createElement("div");
     elNums.id = "nplb-nums";
-    elNums.textContent = nums;
     body.appendChild(elNums);
 
-    const count = document.createElement("div");
-    count.id = "nplb-count";
-    count.hidden = true;
-    const ck = document.createElement("span");
-    ck.className = "k";
-    ck.textContent = "Buying in";
-    const cv = document.createElement("span");
-    cv.className = "v";
-    count.appendChild(ck);
-    count.appendChild(cv);
-    body.appendChild(count);
+    vCount = addRow(body, "Tickets").v;
+    const clock = addRow(body, "Buying in");
+    rowClock = clock.row;
+    vClock = clock.v;
+    rowClock.hidden = true;
 
-    const elNote = document.createElement("div");
+    elNote = document.createElement("div");
     elNote.id = "nplb-note";
-    elNote.textContent = note || "";
-    elNote.hidden = !note;
+    elNote.hidden = true;
     body.appendChild(elNote);
 
-    let btn = null;
-    if (onCancel) {
-      btn = document.createElement("button");
-      btn.id = "nplb-cancel";
-      btn.type = "button";
-      btn.textContent = "Cancel";
-      btn.addEventListener("click", onCancel);
-      body.appendChild(btn);
-    } else {
-      // Click-to-dismiss, but only when there is no Cancel: dismissing a badge
-      // that still has a pending buy behind it would hide the control without
-      // stopping the buy, which is the one thing this panel must not do.
-      el.style.cursor = "pointer";
-      el.title = "Click to dismiss.";
-      el.addEventListener("click", () => el.remove());
-    }
+    btn = document.createElement("button");
+    btn.id = "nplb-btn";
+    btn.type = "button";
+    btn.addEventListener("click", () => (state.running ? stop() : start()));
+    body.appendChild(btn);
 
-    el.appendChild(body);
-    (document.body || document.documentElement).appendChild(el);
+    panel.appendChild(body);
+    (document.body || document.documentElement).appendChild(panel);
+  }
 
-    return {
-      el,
-      setNote: (t, k) => {
-        elNote.textContent = t;
-        elNote.hidden = !t;
-        if (k) el.dataset.kind = k;
-      },
-      setCountdown: (secs) => {
-        count.hidden = secs == null;
-        if (secs != null) cv.textContent = `${secs}s`;
-      },
-      // Removing Cancel is what makes the badge dismissable, so the two go
-      // together: past the point of no return the control would be a lie, and
-      // what is left is a message you may well want out of the way.
-      removeCancel: () => {
-        btn?.remove();
-        btn = null;
-        el.style.cursor = "pointer";
-        el.title = "Click to dismiss.";
-        // On the next task, not now. removeCancel() is called from inside the
-        // Cancel button's own click handler, and that click is still bubbling
-        // toward this element: a listener added during dispatch on an ancestor
-        // the event has not reached yet still fires for that event. Attaching
-        // synchronously made the click that cancels also dismiss the panel,
-        // taking the "Cancelled" message away with it.
-        setTimeout(() => el.addEventListener("click", () => el.remove()), 0);
-      },
-    };
+  function render() {
+    if (!panel) build();
+
+    panel.dataset.running = state.running ? "1" : "0";
+    panel.dataset.kind = spent() ? "done" : "info";
+
+    vCount.textContent = `${state.bought} / ${DAILY_LIMIT}`;
+    vCount.title = `${state.bought} bought today, about ${state.bought * 20} NP`
+      + ` — the lottery allows ${DAILY_LIMIT} a day`;
+
+    elNote.hidden = !elNote.textContent;
+
+    // The day's twenty are the finish line, so the control says so rather than
+    // offering a twenty-first the site would refuse anyway.
+    btn.textContent = state.running
+      ? "Stop"
+      : spent() ? "Done" : resumable() ? "Resume" : "Start";
+    btn.disabled = spent();
+    btn.title = spent()
+      ? `All ${DAILY_LIMIT} tickets bought today — the lottery's own limit.`
+      : state.running
+        ? "Stop buying. The day's count is kept."
+        : resumable()
+          ? `Carry on from ticket ${state.bought}.`
+          : "Buy tickets until the day's twenty are gone.";
+  }
+
+  function setNote(text, kind) {
+    if (!panel) build();
+    elNote.textContent = text || "";
+    elNote.hidden = !text;
+    if (kind) panel.dataset.kind = kind;
   }
 
   // ------------------------------------------------------------------- the run
 
-  function run() {
+  let timer = 0;
+  let hop = 0;
+
+  function clearTimers() {
+    if (timer) { clearInterval(timer); timer = 0; }
+    if (hop) { clearTimeout(hop); hop = 0; }
+  }
+
+  function start() {
+    if (spent()) return;
+    state.running = true;
+    save();
+    setNote("", "info");
+    render();
+    console.info(`${TAG} run started at ${state.bought}/${DAILY_LIMIT}`);
+    step();
+  }
+
+  // A pause, and it says nothing: a button reading Resume states it already.
+  // The count stays, because it is a count of the day rather than of the run -
+  // Neopets does not hand the tickets back because you stopped watching.
+  function stop() {
+    state.running = false;
+    save();
+    clearTimers();
+    if (rowClock) rowClock.hidden = true;
+    setNote("", "info");
+    render();
+    console.info(`${TAG} paused at ${state.bought}/${DAILY_LIMIT}`);
+  }
+
+  // One step of the run, from whatever page it finds itself on:
+  //
+  //   a ticket form   count down, then buy. The buy navigates, so this is the
+  //                   last thing this document does.
+  //   no form         the page a buy landed on. Wait a few seconds, then walk
+  //                   back to the ticket page for the next one.
+  function step() {
+    if (!state.running) return;
+    if (spent()) {
+      state.running = false;
+      save();
+      render();
+      console.info(`${TAG} the day's ${DAILY_LIMIT} are gone`);
+      return;
+    }
+
     const found = findTicketForm();
     if (!found) {
-      console.info(`${TAG} no ticket form on this page; nothing to do`);
-      return;
-    }
-    const { form, inputs } = found;
-    const nums = pickNums();
-    fill(inputs, nums);
-    const picked = nums.join(", ");
-    console.info(`${TAG} filled ${picked}`);
-
-    if (!CONFIG.AUTO_BUY) {
-      if (CONFIG.BADGE) {
-        makeBadge({ nums: picked, note: "Autobuy off - click Buy yourself.", kind: "info" });
-      }
-      return;
-    }
-
-    const already = boughtToday();
-    if (already >= CONFIG.MAX_TICKETS_PER_DAY) {
-      console.info(`${TAG} daily cap reached (${already}/${CONFIG.MAX_TICKETS_PER_DAY}); not buying`);
-      if (CONFIG.BADGE) {
-        makeBadge({
-          nums: picked,
-          note: `Daily cap reached (${already}/${CONFIG.MAX_TICKETS_PER_DAY}) - buy by hand if you want more.`,
-          kind: "info",
-        });
-      }
+      // The confirmation page. Nothing here to buy, so go back for another
+      // ticket - replace rather than assign, so twenty buys leave one entry in
+      // front of the Back button rather than forty.
+      const wait = between();
+      console.info(`${TAG} no ticket form here; back to the ticket page in ${(wait / 1000).toFixed(1)}s`);
+      hop = setTimeout(() => location.replace(TICKET_URL), wait);
       return;
     }
 
     let left = Math.max(0, CONFIG.DELAY_SECONDS);
-    if (left === 0) { doSubmit(form); return; }
-
-    let cancelled = false;
-    const badge = CONFIG.BADGE
-      ? makeBadge({
-          nums: picked,
-          kind: "pending",
-          onCancel: () => {
-            cancelled = true;
-            clearInterval(timer);
-            badge.setCountdown(null);
-            badge.setNote("Cancelled - buy by hand if you want it.", "info");
-            badge.removeCancel();
-            console.info(`${TAG} cancelled by user`);
-          },
-        })
-      : null;
-    badge?.setCountdown(left);
-
-    const timer = setInterval(() => {
-      if (cancelled) return;
+    if (left === 0) {
+      doSubmit(found.form);
+      return;
+    }
+    rowClock.hidden = false;
+    vClock.textContent = `${left}s`;
+    timer = setInterval(() => {
+      if (!state.running) return;
       left -= 1;
-      if (left > 0) { badge?.setCountdown(left); return; }
-      clearInterval(timer);
-      badge?.setCountdown(null);
-      badge?.setNote("Buying...", "done");
-      // Past the point of no return; Cancel would be a lie.
-      badge?.removeCancel();
-      doSubmit(form);
+      if (left > 0) {
+        vClock.textContent = `${left}s`;
+        return;
+      }
+      clearTimers();
+      rowClock.hidden = true;
+      doSubmit(found.form);
     }, 1000);
+  }
+
+  // Filling the boxes is the thing this script inherited from the randomizer
+  // and it happens on every load, run or no run: the numbers carry no decision,
+  // so there is nothing to consent to. Buying is the part that waits for Start.
+  function run() {
+    const found = findTicketForm();
+    if (found) {
+      const nums = pickNums();
+      fill(found.inputs, nums);
+      console.info(`${TAG} filled ${nums.join(", ")}`);
+      render();
+      elNums.textContent = nums.join(", ");
+    } else {
+      render();
+      elNums.textContent = "—";
+      console.info(`${TAG} no ticket form on this page`);
+    }
+
+    if (spent()) {
+      if (state.running) {
+        state.running = false;
+        save();
+        render();
+      }
+      return;
+    }
+    if (state.running) step();
   }
 
   if (document.readyState === "loading") {
