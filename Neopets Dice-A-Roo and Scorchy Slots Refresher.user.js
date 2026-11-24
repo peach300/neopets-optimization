@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.8
+// @version      2.9
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -227,9 +227,16 @@
 // The boredom line is the point of the run, so it is checked before anything
 // else that could end one: if a play both looks like a fault and comes back
 // bored, it is the bored one. Matching it ends the run as a success - green
-// header, and the panel says "done" and nothing else. The wording it matched
-// goes to the console, where it is wanted when a pattern needs checking and
-// not when a run has simply finished.
+// header, and the Start button greys out and reads Done, which is the control
+// saying there is nothing left to start rather than a line of text saying so
+// beside a button that still offers to. The wording it matched goes to the
+// console, where it is wanted when a pattern needs checking and not when a run
+// has simply finished.
+//
+// Done is not permanent, because boredom is not. It clears itself the moment
+// the game's own page stops carrying that line - the site's own word for "you
+// can play again" - and the panel goes back to offering Start, for a fresh run
+// counted from zero.
 //
 // How long that takes, measured once on the live site: 390 plays of
 // Dice-A-Roo. Reported from a real run rather than measured here, but it is
@@ -271,6 +278,34 @@
 // Scorchy Slots makes that worth having: its landing page prints the full
 // rules, a lot more prose for a pattern to collide with than Dice-A-Roo's.
 //
+// STOP IS A PAUSE
+//
+// Stop used to end a run and Start used to begin one from zero, which made
+// the count a record of how long you had left the tab alone rather than of
+// how far the run had got. Boredom takes a few hundred plays, so stopping to
+// read something and starting again threw away the one number that says how
+// close it is.
+//
+// So Stop pauses: the run ends, the plays stay counted, and Start carries on
+// from there - the button even says Resume, since Start and Resume are
+// different promises. The clock, if a cap is ever put back on it, is shifted
+// forward by however long the pause lasted, so it measures time spent running
+// rather than time since you first clicked.
+//
+// One thing still resets the count, and it is the right one: a run that
+// reached the boredom line. That run is finished, so the next Start is a new
+// run. A fault resumes, because a fault left a run part-way to the line.
+//
+// WATCHING IT WAIT
+//
+// The wait between rounds is drawn, not printed. It was a "Next" row counting
+// seconds down; it is now a bar that drains to empty as the round comes due.
+// The information is identical and the reading is gone - a bar half gone is
+// half the wait left, where "3s" meant nothing without remembering what it
+// started at. It sits full while a round's plays are in flight, since there is
+// no wait to show then, and the number survives as the bar's tooltip for when
+// the exact figure is a question you are actually asking.
+//
 // SCOPE
 //
 // This script acts for you. A timer decides when the next play happens, it
@@ -292,6 +327,8 @@
 //     answer rather than once per page load.
 //   - It starts stopped. Running is a click, and it is remembered per game, so
 //     a reload you did not ask for does not resume a run you had finished.
+//     Stop pauses rather than ends: nothing is sent, and the count is kept for
+//     the Start that picks it up - see STOP IS A PAUSE above.
 
 (function () {
   "use strict";
@@ -653,6 +690,9 @@
     plays: 0,            // plays actually submitted this run, which is the NP
     startedAt: 0,        // ms, this run
     nextAt: 0,           // ms, when the next load is due
+    waitFrom: 0,         // ms, when that wait began, so the bar knows its span
+    pausedAt: 0,         // ms, when Stop was clicked, to keep the clock honest
+    finished: false,     // the last run reached the boredom line, so it is over
     recent: [],          // ms timestamps of recent plays, for the rate ceiling
     note: "",            // why it stopped, shown on the panel after a halt
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
@@ -712,6 +752,10 @@
     state.burstLeft = 0;
     state.note = note;
     state.noteKind = kind || "stop";
+    // A finish is remembered apart from the note, because the note is cleared
+    // when it goes stale (see below) and "this run is over" has to outlive it:
+    // it is what stops the next Start resuming a run that already ended.
+    if (state.noteKind === "bored") state.finished = true;
     save();
     clearInterval(tick);
     if (frame) { cancelAnimationFrame(frame); frame = 0; }
@@ -778,9 +822,11 @@
 
   function inspectText(text) {
     const bored = checkBored(text);
-    // "done" and nothing more: a finished run is the expected ending, and the
-    // panel saying so in one word is the whole message. What the page actually
-    // said goes to the console for the times a pattern needs checking.
+    // A finished run is the expected ending, and the panel reports it by
+    // greying the button to Done rather than by printing anything. The note is
+    // still set, because it is what tells the panel the finish belongs to the
+    // page in front of you; it is not drawn. What the page actually said goes
+    // to the console for the times a pattern needs checking.
     if (bored) {
       console.info(`${TAG} ${game}: bored - ${bored}`);
       return { note: "done", kind: "bored" };
@@ -830,6 +876,10 @@
   function schedule() {
     const ms = pickDelay();
     const hold = throttledUntil();
+    // Where the wait starts as well as where it ends. The panel draws the wait
+    // as a bar, and a bar needs the whole span to know how much of it is left;
+    // a countdown only ever needed the end.
+    state.waitFrom = Date.now();
     state.nextAt = Math.max(Date.now() + ms, hold);
     save();
     const wait = (state.nextAt - Date.now()) / 1000;
@@ -1253,24 +1303,54 @@
       console.info(`${TAG} ${game}: already bored - ${already}`);
       state.note = "done";
       state.noteKind = "bored";
+      state.finished = true;
       save();
       render();
       return;
     }
+    // Stop is a pause, so Start is usually a resume: the counts carry on.
+    // Clicking Stop at play 200 and Start again should be play 201, not play 1
+    // - the pet's boredom does not reset because you stopped watching, and the
+    // count is the only record of how far a run has got towards it.
+    //
+    // The one thing that does reset it is a run that finished. Boredom is the
+    // run's ending, so the next Start after one is a new run from zero. A hand
+    // stop or a fault left a run part-way there instead, and that one resumes.
+    if (state.finished || !state.startedAt) {
+      state.count = 0;
+      state.plays = 0;
+      state.games = 0;
+      state.startedAt = Date.now();
+    } else if (state.pausedAt) {
+      // Push the run's start forward by however long it sat paused, so the
+      // clock measures time spent running. Nothing reads it while MAX_MINUTES
+      // is off, but a cap that counted a lunch break would be a surprise the
+      // moment anyone put a number back.
+      state.startedAt += Math.max(0, Date.now() - state.pausedAt);
+    }
+    state.pausedAt = 0;
+    state.finished = false;
     state.running = true;
-    state.count = 0;
-    state.plays = 0;
-    state.games = 0;
     state.burstLeft = 0;
-    state.startedAt = Date.now();
     state.note = "";
     state.noteKind = "stop";
     schedule();
     render();
   }
 
+  // A pause, not a halt: the counts stay, and the note is informational rather
+  // than the red of something that went wrong. halt() still does the work -
+  // clearing the due time and the half-finished round is exactly right, since
+  // neither survives a pause.
   function stop() {
-    halt("stopped by hand");
+    state.pausedAt = Date.now();
+    halt("paused", "info");
+  }
+
+  // Is there a run to pick up, as opposed to one to begin? Drives the button's
+  // word, so that Start and Resume are not the same label doing two things.
+  function resumable() {
+    return !state.running && state.plays > 0 && !state.finished;
   }
 
   // The clock is checked against wall time rather than counted down, because a
@@ -1296,14 +1376,15 @@
   // when it is not. Splitting them gives a countdown that ticks when it should
   // in front of you, and a run that still advances behind your back.
   //
-  // It only writes when the text changes, so painting whole seconds at the
-  // refresh rate costs one assignment a second rather than sixty.
+  // The bar is a transform rather than a width, so a frame of it is a
+  // compositor job and not a layout one, and the tooltip's text is written
+  // only when its whole second changes.
   let frame = 0;
   function paintClock() {
     frame = 0;
-    if (!panel || !state.running || !state.nextAt) return;
-    const text = fmtSeconds(state.nextAt - Date.now());
-    if (vNext.textContent !== text) vNext.textContent = text;
+    if (!panel) return;
+    paintBar();
+    if (!state.running) return;
     frame = requestAnimationFrame(paintClock);
   }
   function startClock() {
@@ -1320,11 +1401,11 @@
   //
   // House style, per .claude/skills/neopets-panel-style: the site's own two
   // fonts from images.neopets.com, the #2367B5 header that turns Meridell green
-  // when the run is done, the Safety Deposit Box's yellow button, and the
-  // countdown in tabular monospace so a passing second changes one digit
-  // instead of reflowing the row. 150px because the site's content column is
-  // 1000px and centred, so at that width the panel sits in the window's margin
-  // rather than over the page.
+  // when the run is done, the Safety Deposit Box's yellow button, and the play
+  // count in tabular monospace so a figure changes one digit instead of
+  // reflowing the row. 150px because the site's content column is 1000px and
+  // centred, so at that width the panel sits in the window's margin rather
+  // than over the page.
 
   const FONT_HOST = "https://images.neopets.com/js/fonts";
   const CAFETERIA = '"NPRF Cafeteria", "Cafeteria", "Arial Bold", sans-serif';
@@ -1414,6 +1495,34 @@
       font-feature-settings: "tnum" 1 !important;
       letter-spacing: 0 !important;
     }
+    /* The wait between rounds, drawn rather than counted: a bar that drains to
+       empty as the next round comes due. It is the same information the "Next"
+       row used to print, with the reading taken out of it - a bar half gone is
+       half the wait left, at a glance, where "3s" had to be compared against a
+       number you no longer remember.
+       The track stays visible while the run is stopped, empty, so the panel
+       still shows there is a wait to be had. */
+    #nprf-bar {
+      margin-top: 6px !important; height: 7px !important;
+      border: 1px solid #bcd3ec !important; border-radius: 4px !important;
+      background: #dce8f6 !important; overflow: hidden !important;
+    }
+    /* No transform here, deliberately. An author !important declaration beats
+       an inline one, so declaring the transform in this stylesheet would make
+       the fill unmovable from script - the same trap the [hidden] note below
+       describes. The starting transform is set inline where the element is
+       built, and every frame after that is an inline write too. */
+    #nprf-fill {
+      display: block !important; width: 100% !important; height: 100% !important;
+      transform-origin: left center !important;
+      background: linear-gradient(#5b9bd9, #2367B5) !important;
+    }
+    #nprf[data-outcome="bored"] #nprf-fill {
+      background: linear-gradient(#2fa86f, #1d774f) !important;
+    }
+    #nprf[data-outcome="stop"] #nprf-fill {
+      background: linear-gradient(#d07a78, #a94442) !important;
+    }
     #nprf-note {
       margin-top: 5px !important; padding-top: 5px !important;
       border-top: 1px solid #cfe0f2 !important;
@@ -1485,7 +1594,7 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  let panel, vCount, vNext, elNote, btnRun;
+  let panel, vCount, elBar, elFill, elNote, btnRun;
 
   // One row of the body: a label that ellipsises and a value that does not move.
   function addRow(parent, label) {
@@ -1525,7 +1634,14 @@
     const body = document.createElement("div");
     body.id = "nprf-body";
     vCount = addRow(body, "Plays");
-    vNext = addRow(body, "Next");
+
+    elBar = document.createElement("div");
+    elBar.id = "nprf-bar";
+    elFill = document.createElement("span");
+    elFill.id = "nprf-fill";
+    elFill.style.transform = "scaleX(0)";
+    elBar.appendChild(elFill);
+    body.appendChild(elBar);
 
     elNote = document.createElement("div");
     elNote.id = "nprf-note";
@@ -1544,15 +1660,13 @@
     (document.body || document.documentElement).appendChild(panel);
   }
 
-  // Whole seconds, floored, and a dash under one. Tenths were worse to look
-  // at than to reason about: a digit changing ten times a second reads as
-  // activity, and the countdown is the one row where nothing is happening -
-  // the run light is what reports activity.
+  // Whole seconds, floored, for the bar's tooltip - the one place a number is
+  // still wanted, because "how long exactly" is a question you ask on purpose
+  // rather than one the panel should answer continuously.
   //
   // Floored rather than rounded, so the number is seconds actually left and
-  // not seconds nearest. Below a second there is no useful number to show, and
-  // "0s" would sit there as a stopped clock, so it becomes the same dash the
-  // row shows when nothing is due.
+  // not seconds nearest. Below a second there is no useful number to show, so
+  // it becomes a dash and the caller says something else instead.
   //
   // The dash is written as an escape rather than the character itself: this
   // file is the only thing a userscript manager hands the page, and a copy of
@@ -1562,6 +1676,36 @@
   function fmtSeconds(ms) {
     if (!(ms >= 1000)) return "\u2014";
     return `${Math.floor(ms / 1000)}s`;
+  }
+
+  // How much of the wait is left, 1 to 0. Full while plays are in flight: the
+  // bar is the wait, and during a round there is none - the run light is what
+  // reports the plays themselves.
+  function barFraction() {
+    if (!state.running) return 0;
+    if (busy || !state.nextAt) return 1;
+    const span = state.nextAt - (state.waitFrom || 0);
+    if (!(span > 0)) return 0;
+    return Math.max(0, Math.min(1, (state.nextAt - Date.now()) / span));
+  }
+
+  function paintBar() {
+    if (!elFill) return;
+    const t = `scaleX(${barFraction().toFixed(3)})`;
+    if (elFill.style.transform !== t) elFill.style.transform = t;
+
+    let label;
+    if (!state.running) {
+      label = state.note || "stopped";
+    } else if (busy) {
+      label = "playing";
+    } else if (state.nextAt) {
+      const secs = fmtSeconds(state.nextAt - Date.now());
+      label = secs === "\u2014" ? "about to play" : `next round in ${secs}`;
+    } else {
+      label = "running";
+    }
+    if (elBar.title !== label) elBar.title = label;
   }
 
   function render() {
@@ -1586,25 +1730,30 @@
       + ` - ${state.games} game${state.games === 1 ? "" : "s"} started,`
       + ` about ${state.games * 5} NP`;
 
-    if (state.running && busy) {
-      // Mid-round. There is no countdown to show, because the plays are in
-      // flight rather than pending.
-      vNext.textContent = "playing";
-    } else if (state.running && state.nextAt) {
-      vNext.textContent = fmtSeconds(state.nextAt - Date.now());
-      startClock();
-    } else {
-      vNext.textContent = "\u2014";
-    }
+    paintBar();
+    if (state.running) startClock();
 
-    elNote.textContent = state.note || "";
-    elNote.hidden = !state.note;
+    // A finished run is reported by the button, not by a line of text: the
+    // control that would start another one is the honest place to say there is
+    // nothing left to start. So it greys out and reads Done, and the note it
+    // replaces ("done", which only ever restated the green header) is not drawn.
+    const done = !state.running && state.finished && !!state.note;
+    elNote.textContent = done ? "" : (state.note || "");
+    elNote.hidden = done || !state.note;
 
-    btnRun.textContent = state.running ? "Stop" : "Start";
-    btnRun.disabled = standDown && !state.running;
-    btnRun.title = btnRun.disabled
-      ? "Nothing on this page starts a play."
-      : state.running ? "Stop the run." : "Start a run.";
+    btnRun.textContent = state.running
+      ? "Stop"
+      : done ? "Done" : resumable() ? "Resume" : "Start";
+    btnRun.disabled = done || (standDown && !state.running);
+    btnRun.title = done
+      ? `Bored of ${game} after ${state.plays} plays. Nothing left to play for.`
+      : btnRun.disabled
+        ? "Nothing on this page starts a play."
+        : state.running
+          ? "Pause the run. The count is kept."
+          : resumable()
+            ? `Carry on from play ${state.plays}.`
+            : "Start a run.";
   }
 
   // ------------------------------------------------- not the landing page
@@ -1631,6 +1780,7 @@
       state.nextAt = 0;
       state.note = "done";
       state.noteKind = "bored";
+      state.finished = true;
       save();
       console.info(`${TAG} ${game}: bored - ${bored}`);
       render();
@@ -1683,6 +1833,22 @@
   // against something that cost nothing.
   state.recent = state.recent.filter((t) => t > Date.now() - 120000);
 
+  // A finished run is remembered, so the panel still reads Done when you come
+  // back to the page it finished on. It must not read Done tomorrow, though -
+  // boredom wears off, and a greyed button with nothing that clears it is a
+  // dead panel. The site itself says when that has happened: the game's own
+  // page stops carrying the boredom line. So the note goes, and with it the
+  // green header and the Done button, and the panel offers Start again.
+  //
+  // `finished` deliberately stays set. It is what makes that Start a new run
+  // from zero rather than a resume of the run that already ended.
+  if (!state.running && state.finished && state.note && !checkBored()) {
+    console.info(`${TAG} ${game}: the bored line is gone from this page; ready again`);
+    state.note = "";
+    state.noteKind = "stop";
+    save();
+  }
+
   // Checked while idle, which is when you would read it. A pattern the page's
   // ordinary text happens to contain would end a run on its first load, every
   // time, with no obvious cause - and a BORED_PATTERNS hit would do it while
@@ -1728,6 +1894,7 @@
         // out on the burst gap rather than the between-rounds delay. A direct
         // timer, not the 1s tick, because the gap is shorter than the tick.
         const gap = burstGap();
+        state.waitFrom = Date.now();
         state.nextAt = Date.now() + gap;
         save();
         render();
