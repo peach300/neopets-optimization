@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.6
+// @version      2.7
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -172,11 +172,12 @@
 // pages are server-rendered HTML and images, so there is nothing in them that
 // needed to.
 //
-// The panel carries two smaller signals for the same reason: a "Last" row
-// counting seconds since the most recent answer, which is proof of life even
-// if a paint is skipped, and a flash of the header's run light on each play.
-// Where an answer states a result it goes in that row's tooltip and the
-// console line.
+// The panel's own signal for the same reason is a flash of the header's run
+// light on each play. There was a "Last" row counting seconds since the most
+// recent answer as well; it was removed, because on this path every play is a
+// page load you can see, so the row was restating what the page in front of
+// you had just done. Where an answer states a result it goes in the console
+// line.
 //
 // What is still true is that the page is a picture of the last answer, not a
 // live view: the form in it belongs to a play the loop has already moved past,
@@ -650,8 +651,7 @@
     note: "",            // why it stopped, shown on the panel after a halt
     noteKind: "stop",    // "bored" (the run's goal) or "stop" (anything else)
     burstLeft: 0,        // plays still owed by the current round, across loads
-    lastPlayAt: 0,       // ms of the most recent answer, for the "Last" row
-    lastResult: "",      // what that answer said happened, if anything matched
+    lastResult: "",      // what the last answer said happened, for the console
     lastBored: null,     // {at, count} of the last boredom line, kept across runs
     token: "",           // last _ref_ck seen, for re-entering a dead-end page
     games: 0,            // games started this run, which is what was charged
@@ -1025,10 +1025,9 @@
     const tok = tokenIn(got.doc);
     if (tok) state.token = tok;
 
-    // One reading of the answer serves all three things that want it: what it
-    // said happened, what the panel shows, and whether the run is over.
+    // One reading of the answer serves both things that want it: what it said
+    // happened, and whether the run is over.
     const text = textOf(got.doc);
-    state.lastPlayAt = Date.now();
     state.lastResult = extractResult(text);
     save();
     console.info(
@@ -1202,7 +1201,6 @@
       state.burstLeft -= 1;
       if (entry.entryForm && entry.entryForm(pageForm)) state.games += 1;
       state.recent.push(Date.now());
-      state.lastPlayAt = Date.now();
       save();
       console.info(`${TAG} ${game}: play ${state.plays}, ${state.burstLeft} left in round`);
       playBtn.click();
@@ -1222,7 +1220,6 @@
       state.burstLeft -= 1;
       state.games += 1;
       state.recent.push(Date.now());
-      state.lastPlayAt = Date.now();
       save();
       console.info(`${TAG} ${game}: new game, play ${state.plays}`);
       postNav(plan);
@@ -1482,7 +1479,7 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  let panel, vCount, vNext, vLast, elNote, elHistory, btnRun;
+  let panel, vCount, vNext, elNote, elHistory, btnRun;
 
   // One row of the body: a label that ellipsises and a value that does not move.
   function addRow(parent, label) {
@@ -1523,7 +1520,6 @@
     body.id = "nprf-body";
     vCount = addRow(body, "Plays");
     vNext = addRow(body, "Next");
-    vLast = addRow(body, "Last");
 
     elNote = document.createElement("div");
     elNote.id = "nprf-note";
@@ -1550,7 +1546,7 @@
   // Whole seconds, floored, and a dash under one. Tenths were worse to look
   // at than to reason about: a digit changing ten times a second reads as
   // activity, and the countdown is the one row where nothing is happening -
-  // the run light and the Last row are what report activity.
+  // the run light is what reports activity.
   //
   // Floored rather than rounded, so the number is seconds actually left and
   // not seconds nearest. Below a second there is no useful number to show, and
@@ -1598,18 +1594,6 @@
       startClock();
     } else {
       vNext.textContent = "\u2014";
-    }
-
-    // Seconds since the last play. Proof of life that does not depend on
-    // having watched the counter's previous value, and the one reading that
-    // still works when a page load is what moved things along.
-    if (state.lastPlayAt) {
-      const age = Math.round((Date.now() - state.lastPlayAt) / 1000);
-      vLast.textContent = age < 1 ? "just now" : age < 90 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
-      vLast.title = state.lastResult ? `${state.lastResult} - ${vLast.textContent}` : vLast.textContent;
-    } else {
-      vLast.textContent = "\u2014";
-      vLast.title = "No play yet this run.";
     }
 
     elNote.textContent = state.note || "";
@@ -1733,9 +1717,9 @@
   if (state.running) {
     state.count += 1;
 
-    // What this page says happened, for the panel's "Last" row. A walk-back
-    // page matches nothing and so leaves the previous result standing, which
-    // is what you want: the last thing that actually happened.
+    // What this page says happened, for the console line. A walk-back page
+    // matches nothing and so leaves the previous result standing, which is
+    // what you want: the last thing that actually happened.
     const landed = extractResult(contentText());
     if (landed) state.lastResult = landed;
 
