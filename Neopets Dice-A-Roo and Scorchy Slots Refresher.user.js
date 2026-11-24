@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      3.0
+// @version      3.1
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -311,11 +311,11 @@
 // the empty track stays exactly where it is, because hiding it would take its
 // height with it and the panel would jump a few times a second instead.
 //
-// What reports a round is the header's run light, which becomes a spinner
-// while one is going: plays as fast as the site answers them is continuous
-// motion, so the indicator for it is too. Between rounds it is the plain dot
-// again. The per-play flash stands down while the spinner runs, since two
-// animations on one element fight and a flash inside a spin reads as neither.
+// What reports a round is the run light's flash, one per play. A spinning
+// ring was tried there first and taken out again: a round is a handful of
+// plays a second apart, so the spin started and stopped every couple of
+// seconds, and a rotation that short reads as choppy rather than busy. The
+// flash is one event per play, which is what is actually happening.
 //
 // SCOPE
 //
@@ -993,8 +993,6 @@
   function flashDot() {
     const dot = document.getElementById("nprf-dot");
     if (!dot) return;
-    // The spinner is already saying it: see the CSS above.
-    if (panel && panel.dataset.busy === "1") return;
     dot.classList.remove("nprf-flash");
     void dot.offsetWidth;
     dot.classList.add("nprf-flash");
@@ -1492,19 +1490,6 @@
       background: transparent !important;
     }
     #nprf[data-running="1"] #nprf-dot { background: #fff !important; }
-    /* Mid-round, the dot becomes a spinner: a round is plays going out as fast
-       as the site answers, and continuous motion is what says so. The ring is
-       the dot's own border with one arc left bright, which costs no element and
-       no image. It replaces the per-play flash while it runs - two animations
-       on one element fight, and a flash inside a spin reads as neither. */
-    @keyframes nprf-spin { to { transform: rotate(360deg) !important; } }
-    #nprf[data-busy="1"] #nprf-dot {
-      width: 10px !important; height: 10px !important;
-      background: transparent !important;
-      border-color: rgba(255,255,255,0.35) !important;
-      border-top-color: #fff !important;
-      animation: nprf-spin 650ms linear infinite !important;
-    }
     /* A tick on the run light per play, for the one you were not watching the
        counter for. */
     @keyframes nprf-flash {
@@ -1742,7 +1727,7 @@
   // neither is the time spent mid-play. The empty track stays in the layout
   // either way: hiding it would take its height with it, and the panel would
   // change height several times a second, which is worse than the flicker it
-  // was meant to cure. The spinner in the header is what reports a round.
+  // was meant to cure. The run light's flash is what reports a round.
   const DRAW_WAIT_MS = 1000;
   function barFraction() {
     if (!state.running || busy || !state.nextAt) return 0;
@@ -1777,10 +1762,6 @@
     // every state lives in the stylesheet beside the rule it changes rather
     // than in a pile of inline writes here.
     panel.dataset.running = state.running ? "1" : "0";
-    // Mid-round, whichever path the plays are going out on: in flight on the
-    // background path, and still owed by this round on the navigating one,
-    // where the plays are the page loads themselves.
-    panel.dataset.busy = state.running && (busy || state.burstLeft > 0) ? "1" : "0";
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
     // No play cap means no denominator to show: "64 / 0" would read as a

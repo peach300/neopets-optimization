@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Wishing Well
 // @namespace    local-advisor-fork
-// @version      1.0
+// @version      1.1
 // @description  Wishes at the Wishing Well for you, naming an item the well has actually granted lately, up to the seven a twelve-hour window allows. It submits the well's own form and spends 22 NP a wish; SUBMIT_WISHES false fills the form and leaves the click to you.
 // @author       Austin Ryder
 // @contributor  Auto-Wisher by @dogwithglasses (Greasy Fork 532440, MIT); this is a restyled fork
@@ -53,6 +53,11 @@
 // original's, and it is kept because the rounder number is easier to spot in a
 // bank statement than a figure that matches the minimum exactly.
 //
+// The wait before each wish is drawn rather than printed: a bar that drains as
+// the wish comes due, the same bar the Refresher uses between its rounds, and
+// it shows this script's other wait too - the pause on the page a wish lands
+// on before walking back to the well. The seconds live in its tooltip.
+//
 // SCOPE, and the ground rule
 //
 // The README's rule is that a script may change what you see, never what you
@@ -84,8 +89,11 @@
     // The one flag that matters. false = fill the form and stop, which is the
     // advisory-only behaviour and spends nothing.
     SUBMIT_WISHES: true,
-    // Seconds of countdown before each wish, with Stop live throughout.
-    DELAY_SECONDS: 3,
+    // The wait before each wish, seconds, drawn from this range. Long enough
+    // to catch a wish you did not want, short enough not to be the thing you
+    // are waiting for. Set both to 0 to wish the moment the page is ready.
+    DELAY_MIN_SECONDS: 1,
+    DELAY_MAX_SECONDS: 2,
     // How long to wait on the page a wish lands on before walking back to the
     // well for the next one, drawn from this range. A person does not wish on
     // a metronome.
@@ -400,6 +408,29 @@
       font-feature-settings: "tnum" 1 !important;
       letter-spacing: 0 !important;
     }
+    /* The wait, drawn rather than counted: a bar that drains as the wish comes
+       due, the same as the Refresher's. It shows both of this script's waits -
+       the countdown before a wish and the pause before walking back to the
+       well - because what they have in common is all the panel needs to say:
+       something is due, and this much of it is left. The seconds are in the
+       tooltip. The track keeps its place while nothing is due, so the panel
+       does not change height every time a wait starts or ends. */
+    #npww-bar {
+      margin-top: 6px !important; height: 7px !important;
+      border: 1px solid #bcd3ec !important; border-radius: 4px !important;
+      background: #dce8f6 !important; overflow: hidden !important;
+    }
+    /* No transform here, deliberately: an author !important declaration beats
+       an inline one, so declaring it would make the fill unmovable from
+       script. The starting transform is set inline where it is built. */
+    #npww-fill {
+      display: block !important; width: 100% !important; height: 100% !important;
+      transform-origin: left center !important;
+      background: linear-gradient(#5b9bd9, #2367B5) !important;
+    }
+    #npww[data-kind="done"] #npww-fill {
+      background: linear-gradient(#2fa86f, #1d774f) !important;
+    }
     #npww-note {
       margin-top: 4px !important; padding-top: 4px !important;
       border-top: 1px solid #cfe0f2 !important;
@@ -461,8 +492,8 @@
   let panel = null;
   let elItem = null;
   let vCount = null;
-  let rowClock = null;
-  let vClock = null;
+  let elBar = null;
+  let elFill = null;
   let elNote = null;
   let btn = null;
 
@@ -512,10 +543,14 @@
     body.appendChild(elItem);
 
     vCount = addRow(body, "Wishes").v;
-    const clock = addRow(body, "Wishing in");
-    rowClock = clock.row;
-    vClock = clock.v;
-    rowClock.hidden = true;
+
+    elBar = document.createElement("div");
+    elBar.id = "npww-bar";
+    elFill = document.createElement("span");
+    elFill.id = "npww-fill";
+    elFill.style.transform = "scaleX(0)";
+    elBar.appendChild(elFill);
+    body.appendChild(elBar);
 
     elNote = document.createElement("div");
     elNote.id = "npww-note";
@@ -558,6 +593,7 @@
     panel.dataset.running = state.running ? "1" : "0";
     panel.dataset.kind = spent() ? "done" : (elNote.textContent ? panel.dataset.kind || "info" : "info");
 
+    paintBar();
     vCount.textContent = `${state.count} / ${MAX_WISHES}`;
     vCount.title = `${state.count} this window, about ${state.count * DONATION} NP`
       + ` — the well allows ${MAX_WISHES} every twelve hours`;
@@ -577,15 +613,91 @@
             : "Fill the form with an item the well has granted lately.";
   }
 
-  // ------------------------------------------------------------------ the run
+  // -------------------------------------------------------------- the waiting
+  //
+  // Two clocks, deliberately. The due check is a half-second interval, because
+  // a browser throttles a background tab's timers to about once a minute
+  // whatever period is asked for - that delays a wish, it does not lose it.
+  // The paint is requestAnimationFrame, which runs at the refresh rate in
+  // front of you and stops dead when the tab is hidden, which is exactly right
+  // for something only worth drawing when it can be seen.
 
-  let timer = 0;
-  let hop = 0;
+  let waitFrom = 0;
+  let waitUntil = 0;
+  let onDue = null;
+  let frame = 0;
+  let tick = 0;
 
-  function clearTimers() {
-    if (timer) { clearInterval(timer); timer = 0; }
-    if (hop) { clearTimeout(hop); hop = 0; }
+  function startWait(ms, fn) {
+    waitFrom = Date.now();
+    waitUntil = waitFrom + ms;
+    onDue = fn;
+    if (!tick) tick = setInterval(checkDue, 500);
+    paintBar();
   }
+
+  function cancelWait() {
+    waitFrom = 0;
+    waitUntil = 0;
+    onDue = null;
+    if (tick) { clearInterval(tick); tick = 0; }
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    paintBar();
+  }
+
+  function checkDue() {
+    if (!waitUntil) return;
+    if (Date.now() < waitUntil) {
+      // Painted from here as well as from rAF. A tab the browser has throttled
+      // - backgrounded, or just not the window in front - gets a frame or two
+      // a second instead of sixty, and a bar that moves twice a second beats
+      // one that sits still and then jumps. It writes only on change, so on a
+      // tab being watched this costs nothing.
+      paintBar();
+      return;
+    }
+    const fn = onDue;
+    cancelWait();
+    if (fn) fn();
+  }
+
+  function barFraction() {
+    if (!waitUntil) return 0;
+    const span = waitUntil - waitFrom;
+    if (!(span > 0)) return 0;
+    return Math.max(0, Math.min(1, (waitUntil - Date.now()) / span));
+  }
+
+  function paintBar() {
+    // Any pending frame is dropped first, because this is called from the due
+    // check as well as from rAF: without it each interval tick would start a
+    // second painting loop beside the one already running, and they multiply.
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    if (!elFill) return;
+    const t = `scaleX(${barFraction().toFixed(3)})`;
+    if (elFill.style.transform !== t) elFill.style.transform = t;
+    const left = waitUntil - Date.now();
+    const label = !waitUntil
+      ? (state.running ? "working" : "nothing due")
+      : left >= 1000 ? `wishing in ${Math.floor(left / 1000)}s` : "about to wish";
+    if (elBar.title !== label) elBar.title = label;
+    if (waitUntil) frame = requestAnimationFrame(paintBar);
+  }
+
+  // Hidden tabs do not fire rAF, so the paint loop dies on a tab switch and
+  // has to be restarted when you come back; the due check above is what keeps
+  // the run going meanwhile.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && waitUntil && !frame) paintBar();
+  });
+
+  function delay() {
+    const lo = Math.max(0, CONFIG.DELAY_MIN_SECONDS);
+    const hi = Math.max(lo, CONFIG.DELAY_MAX_SECONDS);
+    return Math.round((lo + Math.random() * (hi - lo)) * 1000);
+  }
+
+  // ------------------------------------------------------------------ the run
 
   function start() {
     if (spent()) return;
@@ -603,8 +715,7 @@
   function stop() {
     state.running = false;
     save();
-    clearTimers();
-    if (rowClock) rowClock.hidden = true;
+    cancelWait();
     setNote("", "info");
     render();
     console.info(`${TAG} paused at ${state.count}/${MAX_WISHES}`);
@@ -632,31 +743,19 @@
       // leave one entry in front of the Back button rather than fourteen.
       const wait = between();
       console.info(`${TAG} no wish form here; back to the well in ${(wait / 1000).toFixed(1)}s`);
-      hop = setTimeout(() => location.replace(WELL_URL), wait);
+      startWait(wait, () => location.replace(WELL_URL));
       return;
     }
 
     const pick = pickWish();
     setItem(pick);
 
-    let left = Math.max(0, CONFIG.DELAY_SECONDS);
-    if (left === 0) {
+    const ms = delay();
+    if (ms < 100) {
       doWish(found, pick.item);
       return;
     }
-    rowClock.hidden = false;
-    vClock.textContent = `${left}s`;
-    timer = setInterval(() => {
-      if (!state.running) return;
-      left -= 1;
-      if (left > 0) {
-        vClock.textContent = `${left}s`;
-        return;
-      }
-      clearTimers();
-      rowClock.hidden = true;
-      doWish(found, pick.item);
-    }, 1000);
+    startWait(ms, () => doWish(found, pick.item));
   }
 
   function run() {
