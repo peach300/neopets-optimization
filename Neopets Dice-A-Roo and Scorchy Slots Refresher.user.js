@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.3
+// @version      2.4
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -224,10 +224,10 @@
 // HOW IT KNOWS THE PET IS BORED
 //
 // The boredom line is the point of the run, so it is checked before the faults
-// and before the caps: if a load is both the 150th and the bored one, it is the
-// bored one. Matching it ends the run as a success - green header, "run
-// complete", and the load count recorded so a second run has a number to expect
-// rather than only the caps.
+// and before the clock: if a play both runs the time out and comes back bored,
+// it is the bored one. Matching it ends the run as a success - green header,
+// "run complete", and the play count recorded, which is now the only number
+// anyone has for how long this actually takes.
 //
 // A captured bored page says where that line lives. It is served at
 // /games/play_dicearoo.phtml, carries the game's own title, and its content
@@ -253,8 +253,8 @@
 // BORED_PATTERNS is led by the captured line. Note its shape - no apostrophe in
 // "Im", and "SO" with a single o, which an earlier guess requiring "soo" would
 // have missed. The list is deliberately broader than that one line, because
-// Scorchy Slots' wording for this has never been seen; if a slots run reaches
-// the 150-load cap without ending, read the page and add its wording here.
+// Scorchy Slots' wording for this has never been seen; if a slots run runs the
+// clock out without ending, read the page and add its wording here.
 //
 // Both wording lists are checked on every load, so a pattern the page's own
 // text happens to contain would end every run on load one - and a
@@ -271,10 +271,13 @@
 // 5 NP. It does not touch anything else: no other form, no shop, no bank, no
 // pet. The bounds on a forgotten tab are:
 //
-//   - MAX_REFRESHES, counted in plays, and MAX_MINUTES. Note what a burst does
-//     to the first of those: at four to eight plays a round the play cap
-//     arrives in minutes, which is why it was raised to 400 when the burst
-//     grew. The time cap is the one doing the real bounding now.
+//   - MAX_MINUTES, and nothing else. The play cap is off: a run exists to
+//     reach boredom, and a cap counted in plays was only ever a guess at a
+//     number nobody has measured, which ended runs short of the one thing
+//     they were for. So the clock is the only backstop, and it is there for
+//     the case this script cannot see - a game whose boredom wording it has
+//     never matched, playing on at 5 NP a go. Both are settable, and zero
+//     turns either off.
 //   - A floor under the delay between rounds, a bounded burst, and a ceiling on
 //     plays per minute that holds the next round back rather than ending the
 //     run. A separate halt covers a rate only a bug could produce.
@@ -353,17 +356,29 @@
     PLAY_RETRIES: 3,
     RETRY_BACKOFF_MS: 1500,
 
-    // Hard stops for the current run, counted across page loads.
+    // Hard stops for the current run, counted across page loads. Zero turns
+    // either one off.
     //
-    // The play cap is 400 rather than 150 because of the burst: at 150 a run
-    // now ends in about two minutes, and since nobody has yet measured how
-    // many plays boredom actually takes, a cap that tight risks ending every
-    // run before the thing it exists to reach - leaving the panel's "last
-    // bored after N plays" line permanently blank, which is the one number
-    // that would settle it. 400 is about seven and a half minutes at the rate
-    // measured below, comfortably inside the time cap.
-    MAX_REFRESHES: 400,
-    MAX_MINUTES: 25,
+    // The play cap is off, because a run is for reaching boredom and a cap
+    // that lands first just ends it short of the only thing it was for. It
+    // went 150, then 400 as the burst grew, and both of those were guesses at
+    // a number nobody has measured: 194 live Scorchy Slots plays did not get
+    // there. Guessing again is worse than not capping.
+    MAX_REFRESHES: 0,
+    // The time cap stays, as the one backstop on a tab left running. It is
+    // not a tidy bound on the run - it is the thing that stops a game whose
+    // boredom wording this script has never seen from playing all afternoon
+    // on your Neopoints. Scorchy Slots is exactly that game: 194 plays live
+    // without a boredom line, so its wording is still uncaptured and only
+    // the generic /bored/i pattern stands between a run and the clock.
+    //
+    // 90 minutes rather than 25 because the run is now meant to last until
+    // the pet says so. At the measured rate that is in the low thousands of
+    // plays - for Dice-A-Roo a few hundred games and perhaps a couple of
+    // thousand NP, for Scorchy Slots 5 NP every single play, which is the
+    // expensive case. Set it lower if that is more than you want at risk, or
+    // to zero for no backstop at all.
+    MAX_MINUTES: 90,
 
     // Ceiling on plays in any rolling 60 seconds. A throttle, not a halt: a
     // round that would cross it waits until the oldest play in the window ages
@@ -721,12 +736,12 @@
     // Counted in plays, not steps: Dice-A-Roo's walk back to the landing page
     // is a page load but not a game, and charging it against the cap would
     // halve the run for no reason.
-    if (state.plays >= CONFIG.MAX_REFRESHES) {
+    if (CONFIG.MAX_REFRESHES > 0 && state.plays >= CONFIG.MAX_REFRESHES) {
       return `play cap reached (${state.plays}/${CONFIG.MAX_REFRESHES})`;
     }
 
     const mins = (Date.now() - state.startedAt) / 60000;
-    if (state.startedAt && mins >= CONFIG.MAX_MINUTES) {
+    if (CONFIG.MAX_MINUTES > 0 && state.startedAt && mins >= CONFIG.MAX_MINUTES) {
       return `time cap reached (${Math.round(mins)}/${CONFIG.MAX_MINUTES} min)`;
     }
 
@@ -1540,10 +1555,16 @@
     panel.dataset.running = state.running ? "1" : "0";
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
-    vCount.textContent = `${state.plays} / ${CONFIG.MAX_REFRESHES}`;
+    // No play cap means no denominator to show: "64 / 0" would read as a
+    // broken counter, and "64" is the whole truth when nothing is counting
+    // down to anything.
+    vCount.textContent = CONFIG.MAX_REFRESHES > 0
+      ? `${state.plays} / ${CONFIG.MAX_REFRESHES}`
+      : `${state.plays}`;
     // The bill, not the play count: Dice-A-Roo charges per game and rolls for
     // free, so plays times 5 NP would overstate what the run has spent.
-    vCount.title = `${state.plays} plays this run, cap ${CONFIG.MAX_REFRESHES}`
+    vCount.title = `${state.plays} plays this run`
+      + (CONFIG.MAX_REFRESHES > 0 ? `, cap ${CONFIG.MAX_REFRESHES}` : ", no cap")
       + ` - ${state.games} game${state.games === 1 ? "" : "s"} started,`
       + ` about ${state.games * 5} NP`;
 
