@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      3.1
+// @version      3.2
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -716,7 +716,21 @@
   function load() {
     try {
       const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
-      return Object.assign({}, BLANK, raw);
+      const state = Object.assign({}, BLANK, raw);
+      // `finished` arrived with the Done button; before that, a run that
+      // reached the boredom line was recorded only as the note "done" with
+      // kind "bored". Merging BLANK over such a store gives finished: false,
+      // and the panel then draws that note as a line of text beside a live
+      // Start button - the old display and the new one at once. This is what
+      // Scorchy Slots looked like: its run had finished before the upgrade,
+      // while Dice-A-Roo's finished after it and looked right.
+      //
+      // The absent flag is the signal. A store written since carries it
+      // either way, so this only ever fires once per game.
+      if (raw && raw.finished === undefined && raw.noteKind === "bored" && raw.note) {
+        state.finished = true;
+      }
+      return state;
     } catch {
       // A broken store must not read as "running", or a halt could be forgotten
       // and the run resume itself.
