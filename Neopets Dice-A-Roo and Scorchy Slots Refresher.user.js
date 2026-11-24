@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.9
+// @version      3.0
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -302,9 +302,20 @@
 // seconds down; it is now a bar that drains to empty as the round comes due.
 // The information is identical and the reading is gone - a bar half gone is
 // half the wait left, where "3s" meant nothing without remembering what it
-// started at. It sits full while a round's plays are in flight, since there is
-// no wait to show then, and the number survives as the bar's tooltip for when
-// the exact figure is a question you are actually asking.
+// started at. The number survives as the bar's tooltip for when the exact
+// figure is a question you are actually asking.
+//
+// Only a real wait is drawn. The gaps inside a round are a sixth of a second,
+// and a bar that filled and drained that fast several times a second was a
+// flicker pretending to be information. Under a second, nothing is drawn - but
+// the empty track stays exactly where it is, because hiding it would take its
+// height with it and the panel would jump a few times a second instead.
+//
+// What reports a round is the header's run light, which becomes a spinner
+// while one is going: plays as fast as the site answers them is continuous
+// motion, so the indicator for it is too. Between rounds it is the plain dot
+// again. The per-play flash stands down while the spinner runs, since two
+// animations on one element fight and a flash inside a spin reads as neither.
 //
 // SCOPE
 //
@@ -757,9 +768,9 @@
     // it is what stops the next Start resuming a run that already ended.
     if (state.noteKind === "bored") state.finished = true;
     save();
-    clearInterval(tick);
+    stopTick();
     if (frame) { cancelAnimationFrame(frame); frame = 0; }
-    console.info(`${TAG} ${game}: stopped (${state.noteKind}) - ${note}`);
+    console.info(`${TAG} ${game}: stopped (${state.noteKind})${note ? ` - ${note}` : ""}`);
     render();
   }
 
@@ -982,6 +993,8 @@
   function flashDot() {
     const dot = document.getElementById("nprf-dot");
     if (!dot) return;
+    // The spinner is already saying it: see the CSS above.
+    if (panel && panel.dataset.busy === "1") return;
     dot.classList.remove("nprf-flash");
     void dot.offsetWidth;
     dot.classList.add("nprf-flash");
@@ -1334,17 +1347,21 @@
     state.burstLeft = 0;
     state.note = "";
     state.noteKind = "stop";
+    startTick();
     schedule();
     render();
   }
 
-  // A pause, not a halt: the counts stay, and the note is informational rather
-  // than the red of something that went wrong. halt() still does the work -
-  // clearing the due time and the half-finished round is exactly right, since
-  // neither survives a pause.
+  // A pause, not a halt, and it says nothing: a button reading Resume already
+  // states that the run is paused, and a "paused" line under it was the panel
+  // saying the same thing twice. Every other way a run ends still writes a
+  // note, because those are things the button cannot tell you.
+  //
+  // halt() still does the work - clearing the due time and the half-finished
+  // round is exactly right, since neither survives a pause.
   function stop() {
     state.pausedAt = Date.now();
-    halt("paused", "info");
+    halt("", "info");
   }
 
   // Is there a run to pick up, as opposed to one to begin? Drives the button's
@@ -1356,13 +1373,29 @@
   // The clock is checked against wall time rather than counted down, because a
   // background tab throttles timers to about once a minute: that delays a load,
   // it does not lose it or fire a burst of them.
-  const tick = setInterval(() => {
-    if (state.running && state.nextAt && Date.now() >= state.nextAt) {
-      go();
-      return;
-    }
-    render();
-  }, 1000);
+  //
+  // Started and stopped rather than created once, because Stop is a pause now:
+  // halt() stops this timer, and a Resume in the same document has to put it
+  // back. Before, Stop then Start without a page load in between left a run
+  // that said it was running and never sent another play - the one bug a
+  // pause-and-resume button makes reachable.
+  let tick = 0;
+  function startTick() {
+    if (tick) return;
+    tick = setInterval(() => {
+      if (state.running && state.nextAt && Date.now() >= state.nextAt) {
+        go();
+        return;
+      }
+      render();
+    }, 1000);
+  }
+  function stopTick() {
+    if (!tick) return;
+    clearInterval(tick);
+    tick = 0;
+  }
+  startTick();
 
   // The countdown is repainted on its own, from requestAnimationFrame, and not
   // from the interval above, whose period has to stay long: its job is the due
@@ -1423,10 +1456,19 @@
     }
     #nprf {
       box-sizing: border-box !important;
-      position: fixed !important; bottom: 20px !important; right: 18px !important;
+      position: fixed !important; bottom: 25px !important; right: 23px !important;
       z-index: 2147483646 !important;
       width: 150px !important; text-align: left !important;
       font: 12px/1.45 ${MUSEO} !important; color: #333 !important;
+      /* Every inherited text property the page could be setting, restated.
+         Neopets' older game pages carry "body { text-align: center }", and
+         Dice-A-Roo is one of them: anything appended to the body inherits it.
+         text-align was already here for that reason; the rest are the same
+         class of bug waiting for a theme that sets them. */
+      direction: ltr !important;
+      letter-spacing: normal !important; word-spacing: normal !important;
+      text-indent: 0 !important; text-transform: none !important;
+      text-shadow: none !important; white-space: normal !important;
       border: 1px solid #27486d !important; border-radius: 10px !important;
       overflow: hidden !important; background: #fff !important;
       box-shadow: 0 2px 7px rgba(0,0,0,0.3) !important;
@@ -1450,6 +1492,19 @@
       background: transparent !important;
     }
     #nprf[data-running="1"] #nprf-dot { background: #fff !important; }
+    /* Mid-round, the dot becomes a spinner: a round is plays going out as fast
+       as the site answers, and continuous motion is what says so. The ring is
+       the dot's own border with one arc left bright, which costs no element and
+       no image. It replaces the per-play flash while it runs - two animations
+       on one element fight, and a flash inside a spin reads as neither. */
+    @keyframes nprf-spin { to { transform: rotate(360deg) !important; } }
+    #nprf[data-busy="1"] #nprf-dot {
+      width: 10px !important; height: 10px !important;
+      background: transparent !important;
+      border-color: rgba(255,255,255,0.35) !important;
+      border-top-color: #fff !important;
+      animation: nprf-spin 650ms linear infinite !important;
+    }
     /* A tick on the run light per play, for the one you were not watching the
        counter for. */
     @keyframes nprf-flash {
@@ -1678,14 +1733,21 @@
     return `${Math.floor(ms / 1000)}s`;
   }
 
-  // How much of the wait is left, 1 to 0. Full while plays are in flight: the
-  // bar is the wait, and during a round there is none - the run light is what
-  // reports the plays themselves.
+  // How much of the wait is left, 1 to 0, and zero whenever there is nothing
+  // worth drawing.
+  //
+  // The gaps inside a round are 100-250ms. A bar that filled and drained in a
+  // sixth of a second, several times a second, was a flicker rather than an
+  // indicator - so a wait shorter than DRAW_WAIT_MS is not drawn at all, and
+  // neither is the time spent mid-play. The empty track stays in the layout
+  // either way: hiding it would take its height with it, and the panel would
+  // change height several times a second, which is worse than the flicker it
+  // was meant to cure. The spinner in the header is what reports a round.
+  const DRAW_WAIT_MS = 1000;
   function barFraction() {
-    if (!state.running) return 0;
-    if (busy || !state.nextAt) return 1;
+    if (!state.running || busy || !state.nextAt) return 0;
     const span = state.nextAt - (state.waitFrom || 0);
-    if (!(span > 0)) return 0;
+    if (!(span >= DRAW_WAIT_MS)) return 0;
     return Math.max(0, Math.min(1, (state.nextAt - Date.now()) / span));
   }
 
@@ -1715,6 +1777,10 @@
     // every state lives in the stylesheet beside the rule it changes rather
     // than in a pile of inline writes here.
     panel.dataset.running = state.running ? "1" : "0";
+    // Mid-round, whichever path the plays are going out on: in flight on the
+    // background path, and still owed by this round on the navigating one,
+    // where the plays are the page loads themselves.
+    panel.dataset.busy = state.running && (busy || state.burstLeft > 0) ? "1" : "0";
     panel.dataset.outcome = state.running ? "" : (state.note ? state.noteKind : "");
 
     // No play cap means no denominator to show: "64 / 0" would read as a
@@ -1765,7 +1831,7 @@
   // has to say so. This is also the one place that can name *why*, since the
   // page that interrupted it is the page in front of us.
   if (!canAct) {
-    clearInterval(tick);
+    stopTick();
     standDown = true;
     // The boredom check comes first, and deliberately runs on a page the script
     // will not refresh. The captured bored page is served at

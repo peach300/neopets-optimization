@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.1
+// @version      1.2
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -76,9 +76,15 @@
 // waking hours are predicted, not published), Ye Olde Fishing Vortex. A
 // countdown for those would be a made-up number wearing a clock's face.
 //
-// Per-day allowances are counted rather than timed, which is the fourth kind
-// of row: Coconut Shy and Bagatelle show "4/20 used" and only turn into a
-// countdown once the day's tries are gone. Game high-score limits (three
+// Per-day allowances are the fourth kind of row, and they are neither counted
+// nor timed: Coconut Shy, Bagatelle and the Cork Gun Gallery simply say Ready
+// until the game itself says you are out, and then count down to midnight NST.
+// They did show a running tally - "6/20 used" - but that tally was counting
+// openings of the handler page, so a reload, a play made in another tab or a
+// click that never landed all moved it, and it was printed in the clock's own
+// place as though the site had said it. The site does say it, once: the
+// handler's answer carries "No more throws, you've had yer lot." Reading that
+// is worth more than counting twenty of anything. Game high-score limits (three
 // plays of Hasee Bounce) and the scavenging ones (10-13 items from the Money
 // Tree) are left out — those are per-game rules rather than one clock, and a
 // row saying "ready" for them would mean nothing.
@@ -170,6 +176,11 @@
     // {trackerId: {minute, day}} — a window that has to be told to us, with
     // the NST day it was told for. See the Symol Hole.
     hourlyWindows: {},
+    // Tracker ids, in the order you dragged them into. Empty means the
+    // registry's own order, which runs shortest cadence first; anything not
+    // listed (a tracker added in an update) keeps its registry place at the
+    // end rather than jumping to the top.
+    order: [],
   };
 
   const SETTINGS_KEY = "np_timers_settings";
@@ -203,7 +214,6 @@
     {
       id: "springs",
       name: "Healing Springs",
-      cat: "Freebies",
       path: "/faerieland/springs.phtml",
       type: "interval",
       mins: 30,
@@ -226,7 +236,6 @@
     {
       id: "poogle",
       name: "Poogle Racing",
-      cat: "Gambling",
       path: "/faerieland/poogleracing.phtml",
       type: "interval",
       mins: 15,
@@ -234,7 +243,6 @@
     {
       id: "mediocrity",
       name: "Wheel of Mediocrity",
-      cat: "Wheels",
       path: "/prehistoric/mediocrity.phtml",
       type: "interval",
       mins: 40,
@@ -243,7 +251,6 @@
     {
       id: "meteor",
       name: "Meteor",
-      cat: "Freebies",
       path: "/moon/meteor.phtml",
       type: "interval",
       mins: 1 * HOUR,
@@ -252,7 +259,6 @@
     {
       id: "symol",
       name: "Symol Hole",
-      cat: "Petpets",
       path: "/medieval/symolhole.phtml",
       // Both a window and a cooldown, and the window is not knowable from
       // here. Per Jellyneo: every hour has the same 4-minute prize window
@@ -279,7 +285,6 @@
     {
       id: "excitement",
       name: "Wheel of Excitement",
-      cat: "Wheels",
       path: "/faerieland/wheel.phtml",
       type: "interval",
       mins: 2 * HOUR,
@@ -288,7 +293,6 @@
     {
       id: "misfortune",
       name: "Wheel of Misfortune",
-      cat: "Wheels",
       path: "/halloween/wheel/",
       type: "interval",
       mins: 2 * HOUR,
@@ -296,7 +300,6 @@
     {
       id: "hauntedkiosk",
       name: "Haunted Fairgrounds Scratchcard",
-      cat: "Scratchcards",
       path: "/halloween/scratch.phtml",
       type: "interval",
       mins: 2 * HOUR,
@@ -304,7 +307,6 @@
     {
       id: "buriedtreasure",
       name: "Buried Treasure",
-      cat: "Freebies",
       path: "/pirates/buriedtreasure/",
       type: "interval",
       mins: 3 * HOUR,
@@ -313,7 +315,6 @@
     {
       id: "desertkiosk",
       name: "Desert Scratchcard Kiosk",
-      cat: "Scratchcards",
       path: "/desert/sc/kiosk.phtml",
       type: "interval",
       mins: 4 * HOUR,
@@ -321,7 +322,6 @@
     {
       id: "gravedanger",
       name: "Grave Danger",
-      cat: "Petpets",
       path: "/halloween/gravedanger/",
       type: "interval",
       mins: 4 * HOUR,
@@ -331,7 +331,6 @@
     {
       id: "icekiosk",
       name: "Ice Caves Scratchcard Kiosk",
-      cat: "Scratchcards",
       path: "/winter/kiosk.phtml",
       type: "interval",
       mins: 6 * HOUR,
@@ -339,7 +338,6 @@
     {
       id: "strength",
       name: "Test Your Strength",
-      cat: "Freebies",
       path: "/halloween/strtest/",
       type: "interval",
       mins: 6 * HOUR,
@@ -348,7 +346,6 @@
     {
       id: "expellibox",
       name: "Qasalan Expellibox",
-      cat: "Freebies",
       // Jellyneo's link for this one points at an NC giveaway page; the
       // Expellibox itself is here.
       path: "/desert/expellibox.phtml",
@@ -364,7 +361,6 @@
     {
       id: "illusen",
       name: "Illusen's Glade",
-      cat: "Quests",
       path: "/medieval/earthfaerie.phtml",
       type: "interval",
       mins: 12 * HOUR,
@@ -372,7 +368,6 @@
     {
       id: "jhudora",
       name: "Jhudora's Bluff",
-      cat: "Quests",
       path: "/faerieland/darkfaerie.phtml",
       type: "interval",
       mins: 12 * HOUR,
@@ -380,7 +375,6 @@
     {
       id: "shrine",
       name: "Coltzan's Shrine",
-      cat: "Freebies",
       path: "/desert/shrine.phtml",
       type: "interval",
       mins: 13 * HOUR,
@@ -389,7 +383,6 @@
     {
       id: "braintree",
       name: "Brain Tree Quests",
-      cat: "Quests",
       path: "/halloween/braintree.phtml",
       type: "interval",
       mins: 24 * HOUR,
@@ -397,7 +390,6 @@
     {
       id: "hiddentower",
       name: "Hidden Tower",
-      cat: "Shops",
       path: "/faerieland/hiddentower",
       type: "interval",
       mins: 24 * HOUR,
@@ -406,7 +398,6 @@
     {
       id: "magmapool",
       name: "Magma Pool",
-      cat: "Pets",
       path: "/magma/pool.phtml",
       type: "interval",
       mins: 8 * DAY,
@@ -414,26 +405,25 @@
     },
 
     // ---- midnight NST ---------------------------------------------------
-    { id: "trudy", name: "Trudy's Surprise", cat: "Freebies", path: "/trudys_surprise.phtml", type: "daily", on: true },
-    { id: "tombola", name: "Tombola", cat: "Freebies", path: "/island/tombola.phtml", type: "daily", on: true },
-    { id: "fruitmachine", name: "Fruit Machine", cat: "Freebies", path: "/desert/fruitmachine.phtml", type: "daily", on: true },
-    { id: "applebobbing", name: "Apple Bobbing", cat: "Freebies", path: "/halloween/applebobbing.phtml", type: "daily" },
-    { id: "anchor", name: "Anchor Management", cat: "Freebies", path: "/pirates/anchormanagement.phtml", type: "daily" },
-    { id: "forgottenshore", name: "Forgotten Shore", cat: "Freebies", path: "/pirates/forgottenshore.phtml", type: "daily" },
-    { id: "desertedtomb", name: "Deserted Tomb", cat: "Freebies", path: "/worlds/geraptiku/tomb.phtml", type: "daily" },
-    { id: "omelette", name: "Giant Omelette", cat: "Freebies", path: "/prehistoric/omelette.phtml", type: "daily", on: true },
-    { id: "jelly", name: "Giant Jelly", cat: "Freebies", path: "/jelly/jelly.phtml", type: "daily", on: true },
-    { id: "lunar", name: "Lunar Temple", cat: "Freebies", path: "/shenkuu/lunar/", type: "daily" },
-    { id: "neggcave", name: "Mysterious Negg Cave", cat: "Freebies", path: "/shenkuu/neggcave/", type: "daily" },
-    { id: "darkcave", name: "Dark Cave", cat: "Freebies", path: "/magma/darkcave.phtml", type: "daily" },
-    { id: "quarry", name: "Moltara Quarry", cat: "Freebies", path: "/magma/quarry.phtml", type: "daily" },
-    { id: "council", name: "Council Chamber", cat: "Freebies", path: "/altador/council.phtml", type: "daily" },
-    { id: "wiseking", name: "Wise Old King", cat: "Freebies", path: "/medieval/wiseking.phtml", type: "daily" },
-    { id: "grumpyking", name: "Grumpy Old King", cat: "Freebies", path: "/medieval/grumpyking.phtml", type: "daily", note: "Twice a day." },
+    { id: "trudy", name: "Trudy's Surprise", path: "/trudys_surprise.phtml", type: "daily", on: true },
+    { id: "tombola", name: "Tombola", path: "/island/tombola.phtml", type: "daily", on: true },
+    { id: "fruitmachine", name: "Fruit Machine", path: "/desert/fruitmachine.phtml", type: "daily", on: true },
+    { id: "applebobbing", name: "Apple Bobbing", path: "/halloween/applebobbing.phtml", type: "daily" },
+    { id: "anchor", name: "Anchor Management", path: "/pirates/anchormanagement.phtml", type: "daily" },
+    { id: "forgottenshore", name: "Forgotten Shore", path: "/pirates/forgottenshore.phtml", type: "daily" },
+    { id: "desertedtomb", name: "Deserted Tomb", path: "/worlds/geraptiku/tomb.phtml", type: "daily" },
+    { id: "omelette", name: "Giant Omelette", path: "/prehistoric/omelette.phtml", type: "daily", on: true },
+    { id: "jelly", name: "Giant Jelly", path: "/jelly/jelly.phtml", type: "daily", on: true },
+    { id: "lunar", name: "Lunar Temple", path: "/shenkuu/lunar/", type: "daily" },
+    { id: "neggcave", name: "Mysterious Negg Cave", path: "/shenkuu/neggcave/", type: "daily" },
+    { id: "darkcave", name: "Dark Cave", path: "/magma/darkcave.phtml", type: "daily" },
+    { id: "quarry", name: "Moltara Quarry", path: "/magma/quarry.phtml", type: "daily" },
+    { id: "council", name: "Council Chamber", path: "/altador/council.phtml", type: "daily" },
+    { id: "wiseking", name: "Wise Old King", path: "/medieval/wiseking.phtml", type: "daily" },
+    { id: "grumpyking", name: "Grumpy Old King", path: "/medieval/grumpyking.phtml", type: "daily", note: "Twice a day." },
     {
       id: "marrow",
       name: "Guess the Marrow's Weight",
-      cat: "Freebies",
       path: "/medieval/guessmarrow.phtml",
       type: "daily",
       // Your guess is once a day, but the day does not begin at midnight: the
@@ -446,27 +436,32 @@
       used: /you have had your guess for today|competition has already been won/i,
       notyet: /competition has not started yet|marrows take a while to grow/i,
     },
-    { id: "crossword", name: "Faerie Crossword", cat: "Freebies", path: "/games/crossword/", type: "daily" },
-    { id: "dailypuzzle", name: "Daily Puzzle", cat: "Freebies", path: "/community/", type: "daily" },
-    { id: "kikopop", name: "Kiko Pop", cat: "Freebies", path: "/worlds/kiko/kpop/", type: "daily" },
-    { id: "grundo", name: "Blue Grundo Plushie", cat: "Freebies", path: "/faerieland/tdmbgpop.phtml", type: "daily" },
-    { id: "caverns", name: "Faerie Caverns", cat: "Freebies", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
-    { id: "bank", name: "Bank Interest", cat: "Freebies", path: "/bank.phtml", type: "daily", on: true },
-    { id: "questlog", name: "Quest Log", cat: "Quests", path: "/questlog/", type: "daily", on: true },
-    { id: "lab", name: "Lab Ray", cat: "Pets", path: "/lab.phtml", type: "daily", on: true },
-    { id: "petpetlab", name: "Petpet Lab Ray", cat: "Petpets", path: "/petpetlab.phtml", type: "daily" },
-    { id: "coincidence", name: "The Coincidence", cat: "Freebies", path: "/space/coincidence.phtml", type: "daily" },
-    { id: "mystic", name: "Island Mystic", cat: "Freebies", path: "/island/mystichut.phtml", type: "daily" },
-    { id: "haiku", name: "Haiku Generator", cat: "Freebies", path: "/island/haiku/", type: "daily" },
-    { id: "pickyourown", name: "Pick Your Own", cat: "Shops", path: "/medieval/pickyourown", type: "daily" },
-    { id: "lottery", name: "Neopian Lottery", cat: "Gambling", path: "/games/lottery.phtml", type: "daily" },
-    { id: "extravagance", name: "Wheel of Extravagance", cat: "Wheels", path: "/desert/extravagance.phtml", type: "daily" },
-    { id: "knowledge", name: "Wheel of Knowledge", cat: "Wheels", path: "/medieval/knowledge.phtml", type: "daily" },
-    { id: "monotony", name: "Wheel of Monotony", cat: "Wheels", path: "/prehistoric/monotony/", type: "daily" },
-    { id: "starlight", name: "Wheel of Starlight", cat: "Wheels", path: "/premium/wheel.phtml", type: "daily" },
-    { id: "ticketbooth", name: "Tyrannian Ticket Booth", cat: "Freebies", path: "/prehistoric/ticketbooth.phtml", type: "daily" },
-    { id: "shopofoffers", name: "Rich Slorg (Shop of Offers)", cat: "Freebies", path: "/shop_of_offers.phtml", type: "daily" },
-    { id: "tyrannianticket", name: "Tyrannian Battleground", cat: "Battledome", path: "/prehistoric/battleground/", type: "daily" },
+    { id: "crossword", name: "Faerie Crossword", path: "/games/crossword/", type: "daily" },
+    { id: "dailypuzzle", name: "Daily Puzzle", path: "/community/", type: "daily" },
+    { id: "kikopop", name: "Kiko Pop", path: "/worlds/kiko/kpop/", type: "daily" },
+    // Left over from The Void Within and still paying out after the plot
+    // closed. Jellyneo lists it as "up to twice per day" - the second go is a
+    // Premium subscription or watching an advert - so one row cannot be the
+    // whole truth here: it counts the first play and says the rest in its note.
+    { id: "lostinthedark", name: "Lost in the Dark", path: "/games/lostinthedark/", type: "daily", on: true, note: "Once a day \u2014 twice with Premium, or by watching an advert." },
+    { id: "grundo", name: "Blue Grundo Plushie", path: "/faerieland/tdmbgpop.phtml", type: "daily" },
+    { id: "caverns", name: "Faerie Caverns", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
+    { id: "bank", name: "Bank Interest", path: "/bank.phtml", type: "daily", on: true },
+    { id: "questlog", name: "Quest Log", path: "/questlog/", type: "daily", on: true },
+    { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
+    { id: "petpetlab", name: "Petpet Lab Ray", path: "/petpetlab.phtml", type: "daily" },
+    { id: "coincidence", name: "The Coincidence", path: "/space/coincidence.phtml", type: "daily" },
+    { id: "mystic", name: "Island Mystic", path: "/island/mystichut.phtml", type: "daily" },
+    { id: "haiku", name: "Haiku Generator", path: "/island/haiku/", type: "daily" },
+    { id: "pickyourown", name: "Pick Your Own", path: "/medieval/pickyourown", type: "daily" },
+    { id: "lottery", name: "Neopian Lottery", path: "/games/lottery.phtml", type: "daily" },
+    { id: "extravagance", name: "Wheel of Extravagance", path: "/desert/extravagance.phtml", type: "daily" },
+    { id: "knowledge", name: "Wheel of Knowledge", path: "/medieval/knowledge.phtml", type: "daily" },
+    { id: "monotony", name: "Wheel of Monotony", path: "/prehistoric/monotony/", type: "daily" },
+    { id: "starlight", name: "Wheel of Starlight", path: "/premium/wheel.phtml", type: "daily" },
+    { id: "ticketbooth", name: "Tyrannian Ticket Booth", path: "/prehistoric/ticketbooth.phtml", type: "daily" },
+    { id: "shopofoffers", name: "Rich Slorg (Shop of Offers)", path: "/shop_of_offers.phtml", type: "daily" },
+    { id: "tyrannianticket", name: "Tyrannian Battleground", path: "/prehistoric/battleground/", type: "daily" },
 
     // ---- fixed NST windows ----------------------------------------------
     // ---- per-day allowances ---------------------------------------------
@@ -477,41 +472,54 @@
     {
       id: "cocoshy",
       name: "Coconut Shy",
-      cat: "Fairground",
       path: "/halloween/coconutshy.phtml",
       type: "allowance",
       uses: 20,
       bypass: "https://www.neopets.com/halloween/process_cocoshy.phtml?coconut=4",
       bypassPath: "/halloween/process_cocoshy.phtml",
       note: "20 throws a day, 100 NP each.",
+      // Captured from the handler's own answer, which is the whole page when
+      // you follow the direct link:
+      //   points=0&totalnp=535591&success=0&error=Oi%21+No+more+throws%2C+
+      //   you%27ve+had+yer+lot.
+      // Matched against that raw body, where the spaces are "+", so every
+      // gap below is [+\s] rather than a space - the same pattern then works
+      // whether or not something has decoded it first.
+      spent: /no[+\s]more[+\s]throws|had[+\s]yer[+\s]lot/i,
     },
     {
       id: "corkgun",
       name: "Cork Gun Gallery",
-      cat: "Fairground",
       path: "/halloween/corkgun.phtml",
       type: "allowance",
       uses: 20,
       bypass: "https://www.neopets.com/halloween/process_corkgun.phtml",
       bypassPath: "/halloween/process_corkgun.phtml",
       note: "20 shots a day.",
+      // A guess, unlike the two above: this one's refusal has never been
+      // seen. It is built from theirs, which are the only examples there
+      // are. If a cork gun run never stands itself down, read the handler's
+      // answer and put its wording here.
+      spent: /no[+\s]more[+\s](?:shots|corks|goes|plays)|had[+\s]yer[+\s]lot|somebody[+\s]else[+\s]play/i,
     },
     {
       id: "bagatelle",
       name: "Bagatelle",
-      cat: "Fairground",
       path: "/halloween/bagatelle.phtml",
       type: "allowance",
       uses: 20,
       bypass: "https://www.neopets.com/halloween/process_bagatelle.phtml",
       bypassPath: "/halloween/process_bagatelle.phtml",
       note: "20 plays a day, 50 NP each.",
+      // Captured the same way:
+      //   points=0&totalnp=532786&success=0&error=Hey%2C+kid%2C+why+don%27t+
+      //   you+let+somebody+else+play%3F
+      spent: /let[+\s]somebody[+\s]else[+\s]play/i,
     },
 
     {
       id: "snowager",
       name: "Snowager",
-      cat: "Freebies",
       path: "/winter/snowager.phtml",
       type: "window",
       windows: [[6, 7], [14, 15], [22, 23]],
@@ -520,7 +528,6 @@
     {
       id: "deadlydice",
       name: "Deadly Dice",
-      cat: "Gambling",
       path: "/worlds/deadlydice.phtml",
       type: "window",
       windows: [[0, 1]],
@@ -578,6 +585,7 @@
     crossword: "items/fbo_library_tales.gif",
     dailypuzzle: "events/500neopoints.gif",
     kikopop: "items/foo_kiko_carmelpopcorn.gif",
+    lostinthedark: "items/gwl_empty_lantern.gif",
     grundo: "items/plu_TDMBGPOP_replica.gif",
     caverns: "items/bg_faerie_caverns.gif",
     bank: "items/ltoo_scorch_bank.gif",
@@ -604,7 +612,6 @@
   };
 
   const BY_ID = new Map(TRACKERS.map((t) => [t.id, t]));
-  const CATS = [...new Set(TRACKERS.map((t) => t.cat))];
 
   // ------------------------------------------------------------------ store
 
@@ -645,7 +652,26 @@
   }
 
   function isOn(id) {
-    return !!settings.enabled[id];
+    const stored = settings.enabled[id];
+    // A tracker added to this script after you last saved your settings has no
+    // entry at all, which is not the same as being turned off: it predates the
+    // choice. So it falls back to whether it is in the default set, and a row
+    // added in an update shows up instead of hiding until you go looking for
+    // it. Turning it off writes false, which is an answer and is kept.
+    // Unless the map is empty, which is the one state that says you turned
+    // everything off on purpose: the None button writes it, and falling back
+    // to the default set there would put eighteen rows back in an empty panel.
+    // (A first run is not this case - it writes the default set out.)
+    if (stored === undefined) return !emptied() && !!BY_ID.get(id)?.on;
+    return !!stored;
+  }
+
+  // Did you clear the list rather than simply never having answered? The None
+  // button now writes a false per tracker, so an empty map is either that
+  // button from a version before this one or a store that has never been
+  // written at all.
+  function emptied() {
+    return !Object.keys(settings.enabled || {}).length;
   }
 
   function alertsOn(id) {
@@ -687,6 +713,9 @@
     // tally away at midnight NST.
     if (t.type === "allowance") {
       const fresh = prev && prev.endTime > Date.now() ? prev : null;
+      // The game has already said you are out. Nothing counted after that
+      // means anything, and overwriting it would put the row back to ready.
+      if (fresh && fresh.spent) return;
       const count = Math.min(t.uses, (fresh?.count || 0) + 1);
       states[id] = {
         endTime: fresh ? fresh.endTime : Date.now() + msUntilNstMidnight(),
@@ -704,6 +733,25 @@
     states[id] = { endTime: Date.now() + until, src };
     writeStates(states);
     console.info(`${TAG} ${id}: marked done (${src})`);
+  }
+
+  // The day's allowance is gone, said by the game itself rather than counted
+  // up to. This is the only thing that stands an allowance row down now: the
+  // tally was a guess (a click that did not land, a handler page reloaded, a
+  // play made in another tab) and it was being printed as though it were a
+  // number the site had given us.
+  function markSpent(id) {
+    const t = BY_ID.get(id);
+    if (!t || t.type !== "allowance") return;
+    const states = readStates();
+    states[id] = {
+      endTime: Date.now() + msUntilNstMidnight(),
+      count: t.uses,
+      spent: true,
+      src: "text",
+    };
+    writeStates(states);
+    console.info(`${TAG} ${id}: the game says the day's tries are gone`);
   }
 
   // Not "done" — "not open yet". Stored the same way so one row renders both,
@@ -910,22 +958,28 @@
     if (t.type === "allowance") {
       const stored = readStates()[t.id];
       const live = stored && stored.endTime > Date.now() ? stored : null;
-      const used = live?.count || 0;
-      if (used >= t.uses) {
+      // Only the game's own refusal ends the day. The row used to print the
+      // running tally - "6/20" - which read like something the site had told
+      // us and was not: it counted openings of the handler page, so a reload,
+      // a play in another tab or a click that never landed all moved it. A
+      // number that is wrong in both directions is worse than no number, so
+      // the row just says Ready until the answer says you are out.
+      if (live && live.spent) {
         return {
           ready: false,
           ms: live.endTime - Date.now(),
-          label: `all ${t.uses} used \u2014 resets at midnight NST`,
+          label: `the game says you are out of tries \u2014 resets at midnight NST`,
           kind: "allowance",
-          text: formatShort(live.endTime - Date.now()),
         };
       }
+      const used = live?.count || 0;
       return {
         ready: true,
         ms: 0,
-        label: `${used} of ${t.uses} used today`,
+        label: `${t.uses} a day`
+          + (used ? ` \u2014 ${used} counted so far, roughly` : "")
+          + " \u2014 the row stands down when the game says you are out",
         kind: "allowance",
-        text: `${used}/${t.uses}`,
       };
     }
     if (t.type === "window" && t.hourly) {
@@ -992,8 +1046,21 @@
     };
   }
 
+  // Every tracker in the order the settings list is in, which is the order the
+  // panel lists them in too. The panel used to sort itself - ready first, then
+  // soonest - and that was the right default and the wrong thing to keep once
+  // the order became yours to set: a drag that the panel then re-sorted away
+  // would be a control that does nothing. Ready rows are already the green
+  // ones, and the collapsed pill still names the soonest whatever the order.
+  function orderedTrackers() {
+    const order = Array.isArray(settings.order) ? settings.order : [];
+    const rank = new Map(order.map((id, i) => [id, i]));
+    const place = (t) => (rank.has(t.id) ? rank.get(t.id) : order.length + TRACKERS.indexOf(t));
+    return [...TRACKERS].sort((a, b) => place(a) - place(b));
+  }
+
   function activeTrackers() {
-    return TRACKERS.filter((t) => isOn(t.id));
+    return orderedTrackers().filter((t) => isOn(t.id));
   }
 
   // --------------------------------------------------------------- detection
@@ -1134,7 +1201,16 @@
     // in the response you are looking at — so this is the action, not a
     // guess at one, however you got here.
     if (t.bypassPath && location.pathname.toLowerCase().startsWith(t.bypassPath)) {
-      markDone(t.id, "bypass");
+      // The handler answers in its own words, and this page is that answer -
+      // so for an allowance it is read rather than counted. "No more throws"
+      // is the day over; a success=0 beside any other wording is a play that
+      // did not happen and is not counted either.
+      const said = document.body?.innerText || "";
+      if (t.spent && t.spent.test(said)) {
+        markSpent(t.id);
+      } else if (!/success=0/i.test(said)) {
+        markDone(t.id, "bypass");
+      }
       return;
     }
 
@@ -1369,9 +1445,22 @@
       src: url("${FONT_HOST}/museosansrounded-500.woff") format("woff"),
            url("${FONT_HOST}/museosansrounded-500.ttf") format("truetype");
     }
+    /* Every inherited text property the page could be setting, restated here.
+       Neopets' older game pages - Dice-A-Roo among them - carry
+       "body { text-align: center }", which inherits into anything appended to
+       the body. The panel already declared text-align, so it was fine; the
+       settings sheet did not, and the whole dialog came up centred on those
+       pages - headings, labels, hints and all. Declared on these three roots
+       rather than on every descendant, because inheritance does the rest and a
+       blanket rule on "#nptm *" would outrank the few elements that set their
+       own alignment on purpose (the clocks, the buttons, the window field). */
     #nptm, #nptm-settings, #nptm-shade {
       box-sizing: border-box !important;
       font: 12px/1.45 ${MUSEO} !important; color: #333 !important;
+      text-align: left !important; direction: ltr !important;
+      letter-spacing: normal !important; word-spacing: normal !important;
+      text-indent: 0 !important; text-transform: none !important;
+      text-shadow: none !important; white-space: normal !important;
     }
     #nptm *, #nptm-settings * { box-sizing: border-box !important; }
     #nptm {
@@ -1625,6 +1714,25 @@
     }
     .nptm-opt .nptm-opt-name { flex: 1 1 auto !important; color: #22303f !important; }
     .nptm-opt .nptm-opt-when { color: #6a7a8c !important; font-size: 11px !important; }
+    /* An off-site link, in a panel where every other link goes to Neopets:
+       blue, underlined, and with the arrow that says a new tab. It stands in
+       for a clock on the one row that has no time to show until you have been
+       and read it. */
+    .nptm-off {
+      color: #2367B5 !important; text-decoration: underline !important;
+      white-space: nowrap !important;
+      font: 10px/1.4 ${MUSEO} !important;
+    }
+    .nptm-off:hover { color: #14407a !important; }
+    /* Reorder handle in the settings list. */
+    .nptm-grip {
+      flex: none !important; display: flex !important; align-items: center !important;
+      cursor: grab !important; color: #9aabbd !important; padding: 0 1px !important;
+    }
+    .nptm-grip:active { cursor: grabbing !important; }
+    .nptm-grip svg { display: block !important; }
+    .nptm-opt.is-dragging { opacity: 0.45 !important; background: #e3eef9 !important; }
+    .nptm-opt.nptm-sortable { border-radius: 4px !important; }
     #nptm-settings .nptm-guide {
       flex: none !important; color: #2367B5 !important;
       font: 11px/1.4 ${MUSEO} !important; text-decoration: underline !important;
@@ -1796,6 +1904,15 @@
     "c.42-.1.82-.27 1.2-.5l1.43 1.02 1.12-1.12-1.02-1.43c.23-.38.4-.78.5-1.2L14 8.75z" +
     '"/></svg>';
 
+  // Six dots, the usual shorthand for a drag handle.
+  const GRIP_SVG =
+    '<svg width="9" height="13" viewBox="0 0 9 13" aria-hidden="true">' +
+    '<g fill="currentColor">' +
+    '<circle cx="2" cy="2.5" r="1.1"/><circle cx="7" cy="2.5" r="1.1"/>' +
+    '<circle cx="2" cy="6.5" r="1.1"/><circle cx="7" cy="6.5" r="1.1"/>' +
+    '<circle cx="2" cy="10.5" r="1.1"/><circle cx="7" cy="10.5" r="1.1"/>' +
+    "</g></svg>";
+
   // Stroked rather than typographic: ✓ and ✕ render at wildly different
   // weights and baselines across fonts, and at 11px that is the difference
   // between a control and a smudge.
@@ -1842,8 +1959,8 @@
     panel.id = "nptm";
     // Far enough from the corner that it reads as sitting on the page rather
     // than wedged into the window's edge.
-    panel.style.setProperty(vertical, "20px", "important");
-    panel.style.setProperty(horizontal, "18px", "important");
+    panel.style.setProperty(vertical, "25px", "important");
+    panel.style.setProperty(horizontal, "23px", "important");
     panel.dataset.collapsed = settings.collapsed ? "1" : "0";
     panel.dataset.compact = settings.compact ? "1" : "0";
 
@@ -1912,7 +2029,9 @@
 
   function markTitle(t, st) {
     if (t.type === "allowance") {
-      return st.ready ? `Count one more \u2014 ${t.uses} a day` : "Reset today's tally";
+      return st.ready
+        ? `Out of tries \u2014 stand this down until midnight NST`
+        : "Not out after all \u2014 put it back to ready";
     }
     return st.ready
       ? "I just did this \u2014 start the timer"
@@ -1977,9 +2096,26 @@
     if (direct) link.addEventListener("click", () => markDone(t.id, "bypass"));
     row.appendChild(link);
 
+    // The one row that has nothing to count. Until today's four minutes are
+    // known the Symol Hole has no time to show, and it used to print "set" -
+    // an instruction in the clock's place, in the clock's own colour, which
+    // said neither where to go nor that it was leaving Neopets. The link that
+    // answers it goes there instead, marked as off-site.
     const time = document.createElement("span");
     time.className = "nptm-time";
-    time.textContent = timeText(st);
+    const guideHere = needsGuideFirst(t);
+    if (guideHere) {
+      const off = document.createElement("a");
+      off.className = "nptm-off";
+      off.href = t.guide;
+      off.target = "_blank";
+      off.rel = "noopener noreferrer";
+      off.textContent = "Jellyneo \u2197";
+      off.title = `Today's ${t.name} window, published daily \u2014 opens Jellyneo in a new tab`;
+      time.appendChild(off);
+    } else {
+      time.textContent = timeText(st);
+    }
     row.appendChild(time);
 
     // Per-row manual control: the escape hatch for every detection guess.
@@ -1996,8 +2132,16 @@
         e.stopPropagation();
         // `ready` is read at click time from the row's own state, not from
         // the st captured when this row was built a while ago.
-        if (rowState(t).ready) markDone(t.id, "manual");
-        else clearDone(t.id);
+        const nowReady = rowState(t).ready;
+        // An allowance is not a timer you start; it is a day you are out of.
+        if (t.type === "allowance") {
+          if (nowReady) markSpent(t.id);
+          else clearDone(t.id);
+        } else if (nowReady) {
+          markDone(t.id, "manual");
+        } else {
+          clearDone(t.id);
+        }
         render();
       });
       row.appendChild(mark);
@@ -2011,7 +2155,7 @@
       link.click();
     });
 
-    return { row, link, time, mark };
+    return { row, link, time, mark, guideHere };
   }
 
   function renderRows(rows) {
@@ -2045,8 +2189,13 @@
     for (const { t, st } of rows) {
       const built = rowCache.get(t.id);
       if (!built) continue;
-      const text = timeText(st);
-      if (built.time.textContent !== text) built.time.textContent = text;
+      // Not the rows holding a link instead of a clock: writing text here
+      // would throw the link away. A row crossing into or out of that state
+      // changes the signature above and is rebuilt, so this cannot go stale.
+      if (!built.guideHere) {
+        const text = timeText(st);
+        if (built.time.textContent !== text) built.time.textContent = text;
+      }
       const title = linkTitle(t, st, usingBypass(t));
       if (built.link.title !== title) built.link.title = title;
       if (built.mark) {
@@ -2061,19 +2210,18 @@
 
     const rows = activeTrackers()
       .map((t) => ({ t, st: rowState(t) }))
-      .sort((a, b) => {
-        if (a.st.ready !== b.st.ready) return a.st.ready ? -1 : 1;
-        return a.st.ms - b.st.ms;
-      })
       .filter(({ st }) => !settings.readyOnly || st.ready);
 
     const ready = rows.filter(({ st }) => st.ready);
     panel.dataset.anyReady = ready.length ? "1" : "0";
     panel.dataset.compact = settings.compact ? "1" : "0";
+    // Collapsed, the pill is one number for the whole panel, so it is the
+    // soonest of the waiting rows rather than the first row in your order.
+    const waiting = rows.filter(({ st }) => !st.ready);
     mini.textContent = ready.length
       ? `${ready.length} ready`
-      : rows.length
-        ? formatShort(rows[0].st.ms)
+      : waiting.length
+        ? formatShort(Math.min(...waiting.map(({ st }) => st.ms)))
         : "—";
 
     body.style.setProperty(
@@ -2132,17 +2280,6 @@
     if (h && m) return `every ${h}h ${m}m`;
     if (h) return `every ${h} hour${h > 1 ? "s" : ""}`;
     return `every ${m} minutes`;
-  }
-
-  // What the settings page tells you about a row's detection, in the order
-  // the script actually tries: the page's words, then the page's requests,
-  // then a click. Window rows need none of it.
-  function detectionText(t) {
-    if (t.hourly) return "only counts inside the window";
-    if (t.type === "window") return "fixed hours";
-    if (t.used) return "reads the page";
-    if (usingBypass(t)) return "counted when you open the direct link";
-    return "watches the page's own requests";
   }
 
   function openSettings() {
@@ -2342,17 +2479,79 @@
     cornerRow.appendChild(cornerSel);
     globals.appendChild(cornerRow);
 
-    // One section per category, each row a checkbox plus its own bell.
-    for (const cat of CATS) {
-      const list = TRACKERS.filter((t) => t.cat === cat);
-      if (!list.length) continue;
-      const h = document.createElement("h4");
-      h.textContent = cat;
-      scroll.appendChild(h);
+    // One list, in your order, each row a checkbox plus its own bell.
+    //
+    // It used to be a section per category - Freebies, Wheels, Quests and the
+    // rest - which sorted sixty rows into a shape nobody was looking for: the
+    // question in front of this list is "is this one on", and a category is no
+    // help answering it twice. One list in one order is also the only thing
+    // you can drag within, and dragging is what sets the panel's order.
+    {
+      const listHead = document.createElement("h4");
+      listHead.textContent = "Dailies";
+      scroll.appendChild(listHead);
 
-      for (const t of list) {
+      const list = document.createElement("div");
+      list.id = "nptm-list";
+      scroll.appendChild(list);
+
+      // The dragged row moves through the list as you go, so the list itself
+      // is the preview. Dropping just writes down what it already shows.
+      let dragRow = null;
+      const commitOrder = () => {
+        settings.order = [...list.children].map((el) => el.dataset.id);
+        saveSettings();
+        render();
+      };
+      list.addEventListener("dragover", (e) => {
+        if (dragRow) e.preventDefault();
+      });
+      list.addEventListener("drop", (e) => {
+        if (dragRow) e.preventDefault();
+      });
+
+      for (const t of orderedTrackers()) {
         const row = document.createElement("div");
-        row.className = "nptm-opt";
+        row.className = "nptm-opt nptm-sortable";
+        row.dataset.id = t.id;
+
+        // The handle, not the whole row: a row is mostly a checkbox and a
+        // label, and starting a drag from either of those fights the thing
+        // they are for.
+        const grip = document.createElement("span");
+        grip.className = "nptm-grip";
+        grip.innerHTML = GRIP_SVG;
+        grip.title = "Drag to reorder \u2014 the panel follows this order";
+        grip.draggable = true;
+        grip.addEventListener("dragstart", (e) => {
+          dragRow = row;
+          row.classList.add("is-dragging");
+          if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = "move";
+            try {
+              e.dataTransfer.setData("text/plain", t.id);
+            } catch {
+              /* some browsers refuse the payload; the drag still works */
+            }
+          }
+        });
+        // Fires on a drop and on a cancelled drag alike, and by then the list
+        // is already in whatever order you left it in, so one handler writes
+        // both outcomes down.
+        grip.addEventListener("dragend", () => {
+          row.classList.remove("is-dragging");
+          dragRow = null;
+          commitOrder();
+        });
+        row.appendChild(grip);
+
+        row.addEventListener("dragover", (e) => {
+          if (!dragRow || dragRow === row) return;
+          e.preventDefault();
+          const box = row.getBoundingClientRect();
+          const below = e.clientY > box.top + box.height / 2;
+          list.insertBefore(dragRow, below ? row.nextSibling : row);
+        });
 
         row.appendChild(iconFor(t));
 
@@ -2379,9 +2578,14 @@
 
         const when = document.createElement("span");
         when.className = "nptm-opt-when";
-        when.textContent = [cadenceText(t), detectionText(t)]
-          .filter(Boolean)
-          .join(" · ");
+        // The cadence only. There was a second clause here saying how the row
+        // gets detected ("watches the page's own requests" and the like),
+        // which answered a question about the script rather than about the
+        // daily: sixty rows each explaining their own plumbing, in a list
+        // whose job is picking what to track. Where detection matters it is
+        // already on the row in the panel, in its tooltip, as what the timer
+        // was actually set from.
+        when.textContent = cadenceText(t);
         row.appendChild(when);
 
         const bell = document.createElement("button");
@@ -2396,7 +2600,7 @@
         });
         row.appendChild(bell);
 
-        scroll.appendChild(row);
+        list.appendChild(row);
       }
     }
 
@@ -2429,7 +2633,13 @@
     );
     footer.appendChild(
       mkBtn("None", () => {
+        // Explicit falses rather than an empty map: an absent entry now means
+        // "added since you last looked" and falls back to the default set, so
+        // clearing the map would quietly turn the defaults back on.
         settings.enabled = {};
+        TRACKERS.forEach((t) => {
+          settings.enabled[t.id] = false;
+        });
         saveSettings();
         closeSettings();
         openSettings();
