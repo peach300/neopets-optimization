@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      2.4
+// @version      2.5
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -271,13 +271,13 @@
 // 5 NP. It does not touch anything else: no other form, no shop, no bank, no
 // pet. The bounds on a forgotten tab are:
 //
-//   - MAX_MINUTES, and nothing else. The play cap is off: a run exists to
-//     reach boredom, and a cap counted in plays was only ever a guess at a
-//     number nobody has measured, which ended runs short of the one thing
-//     they were for. So the clock is the only backstop, and it is there for
-//     the case this script cannot see - a game whose boredom wording it has
-//     never matched, playing on at 5 NP a go. Both are settable, and zero
-//     turns either off.
+//   - No cap on plays and none on time: both are off, by request, because
+//     both were guesses that ended runs short of the boredom line they exist
+//     to reach. A run ends when the pet is bored, when something unfamiliar
+//     comes back, when the rate says a bug is looping, or when you click
+//     Stop. A game whose boredom wording this script has never matched has
+//     nothing else stopping it, which is the cost of that; MAX_REFRESHES and
+//     MAX_MINUTES take a number again whenever you want one.
 //   - A floor under the delay between rounds, a bounded burst, and a ceiling on
 //     plays per minute that holds the next round back rather than ending the
 //     run. A separate halt covers a rate only a bug could produce.
@@ -357,28 +357,35 @@
     RETRY_BACKOFF_MS: 1500,
 
     // Hard stops for the current run, counted across page loads. Zero turns
-    // either one off.
+    // one off, and both are off: a run ends when the pet says it is bored, or
+    // when you click Stop, and nothing else ends it on purpose. Asked for
+    // directly, twice - the play cap first, then the clock.
     //
-    // The play cap is off, because a run is for reaching boredom and a cap
-    // that lands first just ends it short of the only thing it was for. It
-    // went 150, then 400 as the burst grew, and both of those were guesses at
-    // a number nobody has measured: 194 live Scorchy Slots plays did not get
-    // there. Guessing again is worse than not capping.
+    // Both were guesses at a number nobody has measured. The play cap went
+    // 150, then 400 as the burst grew, and 194 live Scorchy Slots plays still
+    // did not reach boredom; the clock was 25 minutes, then 90. A cap that
+    // lands before the boredom line ends the run short of the only thing it
+    // exists for, and keeps the one number that would settle any of this -
+    // bored after how many plays - permanently blank.
+    //
+    // What is left holding a forgotten tab, since it is no longer these:
+    //
+    //   - The boredom line, read from every single play's answer. The run's
+    //     own ending, and the likely one.
+    //   - HALT_PATTERNS, likewise per play: a random event, the wrong-place
+    //     error, an unavailable game.
+    //   - The runaway-rate halt below, for a rate no bad luck explains.
+    //   - A failed send three times over.
+    //   - Stop, and closing the tab.
+    //
+    // What is not: a game whose boredom wording this script has never matched
+    // will now play until one of those fires or you stop it. Scorchy Slots is
+    // that game - its wording is still uncaptured, only the generic /bored/i
+    // pattern stands there, and every slots play is another 5 NP. Dice-A-Roo
+    // is the cheaper case at 5 NP a game with free rolls. Put a number back in
+    // either of these to bound it again.
     MAX_REFRESHES: 0,
-    // The time cap stays, as the one backstop on a tab left running. It is
-    // not a tidy bound on the run - it is the thing that stops a game whose
-    // boredom wording this script has never seen from playing all afternoon
-    // on your Neopoints. Scorchy Slots is exactly that game: 194 plays live
-    // without a boredom line, so its wording is still uncaptured and only
-    // the generic /bored/i pattern stands between a run and the clock.
-    //
-    // 90 minutes rather than 25 because the run is now meant to last until
-    // the pet says so. At the measured rate that is in the low thousands of
-    // plays - for Dice-A-Roo a few hundred games and perhaps a couple of
-    // thousand NP, for Scorchy Slots 5 NP every single play, which is the
-    // expensive case. Set it lower if that is more than you want at risk, or
-    // to zero for no backstop at all.
-    MAX_MINUTES: 90,
+    MAX_MINUTES: 0,
 
     // Ceiling on plays in any rolling 60 seconds. A throttle, not a halt: a
     // round that would cross it waits until the oldest play in the window ages
