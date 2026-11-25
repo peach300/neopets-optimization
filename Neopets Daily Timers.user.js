@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.4
+// @version      1.5
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -21,7 +21,8 @@
 // The Healing Springs countdown in this folder, generalised. Neopets has
 // dozens of activities on a clock and tells you the remaining time for almost
 // none of them, so the clock is kept here instead: one panel, a row per
-// activity you have switched on, sorted by whichever is ready first.
+// activity you have switched on, in Jellyneo's dailies order until you drag
+// it into your own.
 //
 // The cadences come from Jellyneo's dailies list (jellyneo.net/?go=dailies),
 // read on 2026-11-18. Three kinds are tracked, because three kinds is what
@@ -176,10 +177,10 @@
     // {trackerId: {minute, day}} — a window that has to be told to us, with
     // the NST day it was told for. See the Symol Hole.
     hourlyWindows: {},
-    // Tracker ids, in the order you dragged them into. Empty means the
-    // registry's own order, which runs shortest cadence first; anything not
-    // listed (a tracker added in an update) keeps its registry place at the
-    // end rather than jumping to the top.
+    // Tracker ids, in the order you dragged them into. Empty means
+    // DEFAULT_ORDER, which is Jellyneo's dailies list in its own order;
+    // anything not listed there (a tracker added in an update) keeps its
+    // registry place at the end rather than jumping to the top.
     order: [],
   };
 
@@ -491,6 +492,12 @@
     { id: "grundo", name: "Blue Grundo Plushie", path: "/faerieland/tdmbgpop.phtml", type: "daily" },
     { id: "caverns", name: "Faerie Caverns", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
     { id: "bank", name: "Bank Interest", path: "/bank.phtml", type: "daily", on: true },
+    // Not a single go like the rest of this section: the Battledome has no
+    // cooldown at all, and what resets at midnight NST is the item drops,
+    // fifteen to twenty of them a day. So the row is a reminder that the
+    // day's drops are there to be had rather than a countdown to a button,
+    // and it goes green again at midnight with everything else here.
+    { id: "dome", name: "Battledome", path: "/dome/", type: "daily", on: true, note: "15\u201320 item drops a day, reset at midnight NST \u2014 not a single go." },
     { id: "questlog", name: "Quest Log", path: "/questlog/", type: "daily", on: true },
     { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
     { id: "petpetlab", name: "Petpet Lab Ray", path: "/petpetlab.phtml", type: "daily" },
@@ -579,6 +586,25 @@
     },
   ];
 
+  // The order the panel lists rows in before you drag anything, taken from
+  // the same Jellyneo dailies list the cadences came from (read 2026-11-24).
+  // The registry above is grouped by kind, which is how it is read and
+  // maintained but not how anyone does their dailies; this is the running
+  // order of an actual dailies run, so it is the better default. Ids not
+  // named here - the ones Jellyneo does not list, and anything added in a
+  // later update - keep their registry place at the end rather than jumping
+  // to the top, and a dragged order in the settings beats this entirely.
+  const DEFAULT_ORDER = [
+    "bank", "questlog", "dome", "trudy", "grundo", "anchor", "applebobbing",
+    "shrine", "council", "desertedtomb", "shopofoffers", "caverns",
+    "lostinthedark", "forgottenshore", "fruitmachine", "jelly", "omelette",
+    "gravedanger", "tombola", "springs", "neggcave", "wiseking", "grumpyking",
+    "lottery", "marrow", "kikopop", "expellibox", "strength", "buriedtreasure",
+    "cocoshy", "bagatelle", "lab", "petpetlab", "excitement", "knowledge",
+    "mediocrity", "misfortune", "monotony", "extravagance", "starlight",
+    "hauntedkiosk", "icekiosk",
+  ];
+
   // Jellyneo picks an item image for every daily on its list, and they are all
   // served from images.neopets.com — the same host the page is already loading
   // art from — so the panel borrows them rather than inventing its own icon
@@ -590,6 +616,7 @@
   // its scarab is filled in here by name.
   const IMG_HOST = "https://images.neopets.com";
   const ICONS = {
+    dome: "items/bd_spirit_blade.gif",
     springs: "items/mag_healing_striped.gif",
     poogle: "items/toy_poogle_blue.gif",
     mediocrity: "items/toy_action_plesio.gif",
@@ -1122,7 +1149,17 @@
   function orderedTrackers() {
     const order = Array.isArray(settings.order) ? settings.order : [];
     const rank = new Map(order.map((id, i) => [id, i]));
-    const place = (t) => (rank.has(t.id) ? rank.get(t.id) : order.length + TRACKERS.indexOf(t));
+    // Three tiers, in this order: what you dragged, then DEFAULT_ORDER's
+    // dailies-run order, then whatever the registry happens to list. The
+    // offsets keep the tiers from interleaving - a tracker Jellyneo does not
+    // list cannot land in the middle of the ones it does.
+    const base = order.length;
+    const place = (t) => {
+      if (rank.has(t.id)) return rank.get(t.id);
+      const i = DEFAULT_ORDER.indexOf(t.id);
+      if (i >= 0) return base + i;
+      return base + DEFAULT_ORDER.length + TRACKERS.indexOf(t);
+    };
     return [...TRACKERS].sort((a, b) => place(a) - place(b));
   }
 
