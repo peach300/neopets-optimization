@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.6
+// @version      1.7
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -492,12 +492,7 @@
     { id: "grundo", name: "Blue Grundo Plushie", path: "/faerieland/tdmbgpop.phtml", type: "daily" },
     { id: "caverns", name: "Faerie Caverns", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
     { id: "bank", name: "Bank Interest", path: "/bank.phtml", type: "daily", on: true },
-    // Not a single go like the rest of this section: the Battledome has no
-    // cooldown at all, and what resets at midnight NST is the item drops,
-    // fifteen to twenty of them a day. So the row is a reminder that the
-    // day's drops are there to be had rather than a countdown to a button,
-    // and it goes green again at midnight with everything else here.
-    { id: "dome", name: "Battledome", path: "/dome/", type: "daily", on: true, note: "15\u201320 item drops a day, reset at midnight NST \u2014 not a single go." },
+
     { id: "questlog", name: "Quest Log", path: "/questlog/", type: "daily", on: true },
     { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
     { id: "petpetlab", name: "Petpet Lab Ray", path: "/petpetlab.phtml", type: "daily" },
@@ -520,6 +515,50 @@
     // are gone instead of a countdown, and only starts counting down once the
     // allowance is spent. Both of these are Deserted Fairground games whose
     // own pages are Flash and dead; their handlers still work.
+    // The Battledome has no cooldown at all: what resets at midnight NST is
+    // the item drops. It is the only allowance here whose figure does not
+    // have to be guessed at - the arena prints "1/20" under "Items won in
+    // the Battledome today" - so this row shows the site's own number rather
+    // than a tally of clicks, the way Grave Danger shows the site's own
+    // clock. `uses` is only the fallback for a row that has never been read:
+    // fifteen is the base allowance, and Premium adds five, which is why the
+    // total is taken from the page rather than fixed here.
+    {
+      id: "dome",
+      name: "Battledome",
+      path: "/dome/",
+      type: "allowance",
+      uses: 15,
+      on: true,
+      note: "15\u201320 item drops a day (Premium adds 5), reset at midnight NST.",
+      counter() {
+        // The page's own object first: arena.phtml exposes it as
+        // window.battleDomeLimits(), and a number needs no parsing. This
+        // script runs with grants and so has its own window, which is why it
+        // has to be reached through unsafeWindow.
+        try {
+          const live = typeof unsafeWindow !== "undefined" && unsafeWindow.battleDomeLimits?.();
+          if (live && Number(live.TotalPrizesPerday) > 0) {
+            return {
+              used: Number(live.PrizesEarnedToday),
+              total: Number(live.TotalPrizesPerday),
+            };
+          }
+        } catch {
+          /* the page has no such function, or will not hand it over */
+        }
+        // Failing that, the figure as printed beside the counter's label.
+        const said = document.getElementById("prizeLimits")?.textContent || "";
+        const m = said.match(/(\d+)\s*\/\s*(\d+)/);
+        if (!m) return null;
+        const used = Number(m[1]);
+        const total = Number(m[2]);
+        // A total of zero, or a tally wildly past it, is not this counter.
+        if (!total || total > 100 || used > total + 5) return null;
+        return { used, total };
+      },
+    },
+
     {
       id: "cocoshy",
       name: "Coconut Shy",
@@ -828,6 +867,31 @@
     console.info(`${TAG} ${id}: ${formatShort(endTime - Date.now())} left, read from the page`);
   }
 
+  // The activity prints its own tally, so the count is a reading rather than
+  // a guess. Stored like any other allowance - the endTime is only there to
+  // throw the day away at midnight NST - with the total the page gave and a
+  // src of "page", which is what the row reads to know the figure can be
+  // shown as it stands.
+  function markCounted(id, used, total) {
+    const t = BY_ID.get(id);
+    if (!t || t.type !== "allowance") return;
+    const states = readStates();
+    const prev = states[id];
+    const fresh = prev && prev.endTime > Date.now() ? prev : null;
+    // The page says the same thing on every read, and this one is re-read
+    // every few seconds; without this the store and the log would churn.
+    if (fresh && fresh.src === "page" && fresh.count === used && fresh.total === total) return;
+    states[id] = {
+      endTime: fresh ? fresh.endTime : Date.now() + msUntilNstMidnight(),
+      count: used,
+      total,
+      spent: used >= total,
+      src: "page",
+    };
+    writeStates(states);
+    console.info(`${TAG} ${id}: ${used}/${total} taken today, read from the page`);
+  }
+
   // The day's allowance is gone, said by the game itself rather than counted
   // up to. This is the only thing that stands an allowance row down now: the
   // tally was a guess (a click that did not land, a handler page reloaded, a
@@ -1058,6 +1122,26 @@
       // a play in another tab or a click that never landed all moved it. A
       // number that is wrong in both directions is worse than no number, so
       // the row just says Ready until the answer says you are out.
+      // A figure the site printed, which is the one allowance tally worth
+      // putting on the row: it is the site's own count, not this script's
+      // guess at one, so it goes in the clock's place as "3/20".
+      if (live && live.src === "page" && live.total) {
+        if (live.count < live.total) {
+          return {
+            ready: true,
+            ms: 0,
+            text: `${live.count}/${live.total}`,
+            label: `${live.count} of today's ${live.total} taken \u2014 read from the page`,
+            kind: "allowance",
+          };
+        }
+        return {
+          ready: false,
+          ms: live.endTime - Date.now(),
+          label: `today's ${live.total} are gone \u2014 resets at midnight NST`,
+          kind: "allowance",
+        };
+      }
       if (live && live.spent) {
         return {
           ready: false,
@@ -1304,6 +1388,25 @@
         // other way; either way the row should say ready.
         clearDone(t.id);
       }
+    }
+
+    // 0b. The page states how many of the day's allowance are gone. The
+    //     Battledome is the only one that does, and like the countdown above
+    //     it is the site's own figure rather than a tally kept here.
+    if (t.counter) {
+      const read = () => {
+        const got = t.counter();
+        if (got) markCounted(t.id, got.used, got.total);
+      };
+      read();
+      // Re-read, rather than read once: the counter is printed when a fight
+      // ends, which can be a long while after the page loaded, and the page
+      // never reloads around it. Five seconds costs one failed lookup and
+      // keeps the row right by the time you glance at the panel.
+      setInterval(read, 5000);
+      // Nothing below is armed. A click in the arena is not a drop, and the
+      // page is about to say what the real number is anyway.
+      return;
     }
 
     // Jumping in outside the prize window does not start a cooldown, and the
