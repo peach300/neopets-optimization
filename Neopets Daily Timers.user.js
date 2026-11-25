@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.8
+// @version      1.9
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -375,6 +375,31 @@
         return null;
       },
     },
+    // The one row here whose cadence nobody states the same way twice. It is
+    // per pet and counted from that pet's last catch rather than from
+    // midnight; Jellyneo's dailies list simply calls it "(Random)", The
+    // Daily Neopets says the wait is random but "usually in the 12 to 24
+    // hour range", and SunnyNeo says a pet is back "as minimum as 2 hours to
+    // at most 24". Twelve is the figure this counts from: the low end of the
+    // range the two guides agree on, so the row is sometimes green early and
+    // is not green late, and fishing early costs an empty net rather than a
+    // missed day.
+    //
+    // `refused` is what the page says when you fish before your pet is ready
+    // - the catch comes up empty with "Maybe you should be more patient" -
+    // which is the one thing the page does tell us: the wait is still
+    // running. It says nothing about how much is left, so a timer already
+    // stored beats it (see the refused branch in watchForVisit).
+    {
+      id: "fishing",
+      name: "Ye Olde Fishing Vortex",
+      path: "/water/fishing.phtml",
+      type: "interval",
+      mins: 12 * HOUR,
+      on: true,
+      note: "Per pet, counted from its last catch \u2014 anywhere from 12 to 24 hours, so this counts the earliest.",
+      refused: /more patient/i,
+    },
     {
       id: "icekiosk",
       name: "Ice Caves Scratchcard Kiosk",
@@ -651,7 +676,7 @@
   // later update - keep their registry place at the end rather than jumping
   // to the top, and a dragged order in the settings beats this entirely.
   const DEFAULT_ORDER = [
-    "bank", "questlog", "dome", "trudy", "grundo", "anchor", "applebobbing",
+    "bank", "questlog", "dome", "trudy", "grundo", "fishing", "anchor", "applebobbing",
     "shrine", "council", "desertedtomb", "shopofoffers", "caverns",
     "lostinthedark", "forgottenshore", "fruitmachine", "jelly", "omelette",
     "gravedanger", "tombola", "springs", "neggcave", "wiseking", "grumpyking",
@@ -673,6 +698,7 @@
   const IMG_HOST = "https://images.neopets.com";
   const ICONS = {
     dome: "items/bd_spirit_blade.gif",
+    fishing: "items/vor_evilcarp.gif",
     springs: "items/mag_healing_striped.gif",
     poogle: "items/toy_poogle_blue.gif",
     mediocrity: "items/toy_action_plesio.gif",
