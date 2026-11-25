@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.5
+// @version      1.6
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -2754,6 +2754,24 @@
           }
         });
         saveSettings();
+        closeSettings();
+        openSettings();
+        render();
+      }),
+    );
+    footer.appendChild(
+      mkBtn("Default order", () => {
+        // The order only, leaving on and off alone - the two are separate
+        // questions and the Default button beside this one answers the other.
+        // This empties the list rather than writing DEFAULT_ORDER into it, so
+        // the panel goes back to following that list: a tracker added in a
+        // later update then lands where Jellyneo puts it, instead of at the
+        // end of a copy of the list made today.
+        settings.order = [];
+        saveSettings();
+        // Reopened rather than re-sorted in place, which is what the two
+        // buttons beside this one do: the list is built from orderedTrackers()
+        // once, so rebuilding the sheet is how it comes back in the new order.
         closeSettings();
         openSettings();
         render();
