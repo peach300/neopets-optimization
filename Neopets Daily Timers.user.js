@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.7
+// @version      1.8
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -205,6 +205,8 @@
   //   action: the control that counts as doing it, matched against a button's
   //       text, value or href. Without one, any button or action link in the
   //       page body counts.
+  //   paths: further addresses the same activity answers on, matched the same
+  //       way as path. The Fruit Machine has two.
 
   const MIN = 1;
   const HOUR = 60;
@@ -452,7 +454,22 @@
     // ---- midnight NST ---------------------------------------------------
     { id: "trudy", name: "Trudy's Surprise", path: "/trudys_surprise.phtml", type: "daily", on: true },
     { id: "tombola", name: "Tombola", path: "/island/tombola.phtml", type: "daily", on: true },
-    { id: "fruitmachine", name: "Fruit Machine", path: "/desert/fruitmachine.phtml", type: "daily", on: true },
+    // Two pages, one activity. Jellyneo's dailies list links the Fruit
+    // Machine at /desert/fruitmachine.phtml, and that is what this row links
+    // to, but Neopets' own premium Dailies widget links it at
+    // /desert/fruit/index.phtml - one of the two redirects to the other. A
+    // row that knew only the first saw nothing at all once the page it
+    // landed on was the second: no tracker matched, so no watcher was armed
+    // and a spin was never recorded. Claiming both pages costs nothing and
+    // works whichever way the redirect goes.
+    {
+      id: "fruitmachine",
+      name: "Fruit Machine",
+      path: "/desert/fruitmachine.phtml",
+      paths: ["/desert/fruit/"],
+      type: "daily",
+      on: true,
+    },
     { id: "applebobbing", name: "Apple Bobbing", path: "/halloween/applebobbing.phtml", type: "daily" },
     { id: "anchor", name: "Anchor Management", path: "/pirates/anchormanagement.phtml", type: "daily" },
     { id: "forgottenshore", name: "Forgotten Shore", path: "/pirates/forgottenshore.phtml", type: "daily" },
@@ -1261,8 +1278,10 @@
     let bestLen = 0;
     for (const t of TRACKERS) {
       // A handler page (process_cocoshy.phtml and friends) belongs to its
-      // activity just as much as the activity's own page does.
-      for (const candidate of [t.path, t.bypassPath]) {
+      // activity just as much as the activity's own page does, and so does a
+      // second address for the same activity (`paths`, see the Fruit
+      // Machine).
+      for (const candidate of [t.path, t.bypassPath, ...(t.paths || [])]) {
         if (!candidate || !path.startsWith(candidate)) continue;
         if (candidate.length > bestLen) {
           best = t;
