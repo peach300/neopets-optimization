@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.9
+// @version      2.0
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -207,6 +207,18 @@
   //       page body counts.
   //   paths: further addresses the same activity answers on, matched the same
   //       way as path. The Fruit Machine has two.
+  //   textOnly: only the page's own words mark this row. Nothing you click on
+  //       it counts, because one go is not the whole thing - see Dice-A-Roo.
+
+  // The line that ends a day of Dice-A-Roo or Scorchy Slots. Taken from the
+  // refresher's BORED_PATTERNS in this same folder, which is led by a line
+  // captured off a real bored page: "Im SO BORED of Dice-A-Roo... let's play
+  // something else!" - no apostrophe, and "SO" with a single o, which an
+  // earlier guess at this got wrong. The vowel is left stretchable and the
+  // pronoun optional in case the rendering varies, and the bare word is
+  // there because Scorchy Slots' own wording has never been captured.
+  const BORED_RE =
+    /(?:\bi'?m\s+|\bis\s+)?so+\s+bored\s+of\b|\bbored\b|let'?s play something else/i;
 
   const MIN = 1;
   const HOUR = 60;
@@ -526,6 +538,37 @@
     { id: "crossword", name: "Faerie Crossword", path: "/games/crossword/", type: "daily" },
     { id: "dailypuzzle", name: "Daily Puzzle", path: "/community/", type: "daily" },
     { id: "kikopop", name: "Kiko Pop", path: "/worlds/kiko/kpop/", type: "daily" },
+
+    // Neither of these is done by doing it once: you play until the pet says
+    // it is bored of the game, which takes a few hundred plays and is the
+    // only thing that ends the day. So the row is marked by the page's own
+    // words and by nothing else - `textOnly` keeps the request and click
+    // watchers off, since a play is not a visit to record and arming them
+    // would tick the row off on the first roll.
+    //
+    // The day itself resets at midnight NST, like every other row in this
+    // section, and the manual tick still works if you played elsewhere.
+    {
+      id: "dicearoo",
+      name: "Dice-A-Roo",
+      path: "/games/dicearoo.phtml",
+      paths: ["/games/play_dicearoo.phtml"],
+      type: "daily",
+      on: true,
+      note: "Played until the pet is bored of it \u2014 the row is marked by that line, and the day resets at midnight NST.",
+      used: BORED_RE,
+      textOnly: true,
+    },
+    {
+      id: "slots",
+      name: "Scorchy Slots",
+      path: "/games/slots.phtml",
+      type: "daily",
+      on: true,
+      note: "Played until the pet is bored of it \u2014 the row is marked by that line, and the day resets at midnight NST.",
+      used: BORED_RE,
+      textOnly: true,
+    },
     // Left over from The Void Within and still paying out after the plot
     // closed. Jellyneo lists it as "up to twice per day" - the second go is a
     // Premium subscription or watching an advert - so one row cannot be the
@@ -680,7 +723,7 @@
     "shrine", "council", "desertedtomb", "shopofoffers", "caverns",
     "lostinthedark", "forgottenshore", "fruitmachine", "jelly", "omelette",
     "gravedanger", "tombola", "springs", "neggcave", "wiseking", "grumpyking",
-    "lottery", "marrow", "kikopop", "expellibox", "strength", "buriedtreasure",
+    "lottery", "marrow", "dicearoo", "slots", "kikopop", "expellibox", "strength", "buriedtreasure",
     "cocoshy", "bagatelle", "lab", "petpetlab", "excitement", "knowledge",
     "mediocrity", "misfortune", "monotony", "extravagance", "starlight",
     "hauntedkiosk", "icekiosk",
@@ -698,6 +741,8 @@
   const IMG_HOST = "https://images.neopets.com";
   const ICONS = {
     dome: "items/bd_spirit_blade.gif",
+    dicearoo: "items/fur_dice_gold.gif",
+    slots: "games/clicktoplay/icon_8.gif",
     fishing: "items/vor_evilcarp.gif",
     springs: "items/mag_healing_striped.gif",
     poogle: "items/toy_poogle_blue.gif",
@@ -1510,6 +1555,9 @@
         // timer already stored is better information than a fresh guess.
         if (!stored || stored.endTime <= Date.now()) mark("refused");
       }
+      // The page's word is the only one that counts here: a row you play at
+      // until it tells you to stop is not finished by a click on it.
+      if (t.textOnly) return;
     }
 
     // 2. The site's own request. Most of H5 does its dailies over AJAX —
