@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Monotony Spin Guard
 // @namespace    local-advisor-fork
-// @version      1.3
+// @version      1.4
 // @description  Shows a live countdown for a Wheel of Monotony spin and keeps the tab from being discarded or reloaded out from under it. Display and protection only: it never spins, donates, or claims.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/prehistoric/monotony/*
@@ -243,8 +243,9 @@
   padding: 5px 8px 7px !important;
   background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
 }
-/* The status line says the whole thing, consequence included, so there is no
-   second line of explanation under the clock to go stale beside it. */
+/* One word, because the panel has one subject and the header already names
+   it. What the word does not carry - whether the tab is actually held
+   against an unloader - is carried by the colour instead. */
 #spinguard-state { font: 11px/1.4 ${MUSEO} !important; color: #1b4f85 !important; }
 /* Proportional digits reflow the line on every tick, which is what makes a
    countdown visibly jitter. The min-width covers the longest form the value
@@ -303,7 +304,7 @@
 
     const head = document.createElement("div");
     head.id = "spinguard-head";
-    head.textContent = "Spin Guard";
+    head.textContent = "Wheel of Monotony";
     badge.appendChild(head);
 
     const body = document.createElement("div");
@@ -374,22 +375,21 @@
     const left = endTime - Date.now();
     if (left <= 0) {
       setState("done");
-      stateEl.textContent = "Finished — claim on the wheel";
+      stateEl.textContent = "Finished";
       timeEl.hidden = true;
       stopTicker();
       stopClock();
       unguard();
       return;
     }
-    setState("spin");
+    // The unload prompt is installed either way, but the audio hold is what
+    // keeps an unloader off the tab, and when it did not start the guard is
+    // not guarding - the browser can take the tab without you touching it.
+    // That is a fault rather than a state of the spin, so it goes on the
+    // colour and leaves the word alone.
+    setState(holding() ? "spin" : "fault");
+    stateEl.textContent = "Spinning";
     timeEl.hidden = false;
-    // The unload prompt is installed either way; the audio hold is what keeps
-    // an unloader off the tab, so the status reports that specifically. The
-    // held line is an instruction because the only remaining risk is you; the
-    // unheld one is a warning because the browser can take the tab on its own.
-    stateEl.textContent = holding()
-      ? "Spinning — do not reload or leave"
-      : "Spinning — not held, may be discarded";
   }
 
   function stopTicker() {
@@ -452,7 +452,7 @@
       if (!badge) buildBadge();
       setState("fault");
       const left = data.endTime - Date.now();
-      stateEl.textContent = "Abandoned on load — refund due, spin again";
+      stateEl.textContent = "Abandoned";
       // Not ticked, and deliberately: this figure is the leftover of a spin
       // that is already lost, so it is a reading of what the server still
       // holds rather than a countdown to anything that can be claimed. It is
