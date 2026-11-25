@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      1.3
+// @version      1.4
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -324,9 +324,53 @@
       name: "Grave Danger",
       path: "/halloween/gravedanger/",
       type: "interval",
+      // Only the fallback now, for a timer started by a click rather than
+      // read: an adventure lasts anywhere from four to ten hours, and four is
+      // the earliest it could possibly be back. `countdown` below is what
+      // normally sets this row, and this figure is used only when the page
+      // could not be read at all.
       mins: 4 * HOUR,
-      note: "Anywhere from 4 to 10 hours — this counts the earliest.",
+      note: "Four to ten hours \u2014 the page's own countdown is read when you visit.",
       on: true,
+      // Grave Danger is the one activity that prints how long is left, so
+      // there is no need to assume the shortest adventure and then be wrong
+      // by up to six hours. Two readings of the same number, best first:
+      //
+      //   GDActive.target is the server timestamp the page's own counter
+      //   counts down to, and GD.offset is its correction for a browser clock
+      //   that disagrees with the server (0 on the page this was read from).
+      //   Both are plain numbers in an inline script, so neither needs the
+      //   page's own objects to be reachable - which matters, because this
+      //   script runs with a grant and so has its own window.
+      //
+      //   #gdRemaining is the rendered form of it: "2 hours, 9 minutes, 35
+      //   seconds". Second because that is the English of it, and the account
+      //   sets the language - a number does not need translating.
+      //
+      // Returns milliseconds left, 0 if the Petpet is home and the row should
+      // read ready, or null if neither could be found - a layout change, say -
+      // in which case nothing is written and the watchers below carry on as
+      // they did before.
+      countdown() {
+        const src = [...document.scripts].map((el) => el.textContent || "").join("\n");
+        const target = src.match(/GDActive[\s\S]{0,400}?target:\s*"?(\d{9,12})"?/);
+        if (target) {
+          const offset = src.match(/GD\s*=\s*\{[\s\S]{0,300}?offset:\s*(-?\d+)/);
+          const ms = (Number(target[1]) - Number(offset?.[1] || 0)) * 1000 - Date.now();
+          // A timestamp that puts the end more than a day out is not this
+          // adventure, whatever it is, and is not worth storing.
+          if (ms > 0 && ms <= 24 * 60 * 60_000) return ms;
+        }
+        const said = document.getElementById("gdRemaining")?.textContent || "";
+        const hms = said.match(/(\d+)\D+(\d+)\D+(\d+)/);
+        if (hms) {
+          return (Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])) * 1000;
+        }
+        // No countdown anywhere, but the page is offering the Petpet picker:
+        // nothing is out, so whatever we were holding has expired.
+        if (document.getElementById("gdSelection")) return 0;
+        return null;
+      },
     },
     {
       id: "icekiosk",
@@ -736,6 +780,27 @@
     console.info(`${TAG} ${id}: marked done (${src})`);
   }
 
+  // The activity has said exactly when it will be back, rather than leaving
+  // us to add its shortest cooldown to the clock. Same store and the same
+  // source ranking as markDone - only the end time is a reading rather than
+  // an assumption.
+  function markUntil(id, endTime, src = "page") {
+    if (!BY_ID.get(id)) return;
+    const states = readStates();
+    const prev = states[id];
+    if (prev && prev.endTime > Date.now()) {
+      const better = (SOURCE_RANK[src] || 0) >= (SOURCE_RANK[prev.src] || 0);
+      if (!better) return;
+      // The page says the same thing on every visit, and a few seconds of
+      // difference is the clock moving rather than news. Without this, every
+      // load of the page writes the store and logs a line.
+      if (prev.src === src && Math.abs(prev.endTime - endTime) < 5000) return;
+    }
+    states[id] = { endTime, src };
+    writeStates(states);
+    console.info(`${TAG} ${id}: ${formatShort(endTime - Date.now())} left, read from the page`);
+  }
+
   // The day's allowance is gone, said by the game itself rather than counted
   // up to. This is the only thing that stands an allowance row down now: the
   // tally was a guess (a click that did not land, a handler page reloaded, a
@@ -923,6 +988,7 @@
     refused: "the page turned you away \u2014 a full wait assumed",
     bypass: "you opened the direct link",
     manual: "you marked it done",
+    page: "the page's own countdown",
   };
 
   function rowState(t) {
@@ -1140,7 +1206,9 @@
   // How a visit was established, worst to best. A better source may overwrite
   // a worse one for the same activity; the reverse is ignored, so a stray
   // click cannot downgrade a reading taken from the page's own text.
-  const SOURCE_RANK = { refused: 1, click: 1, request: 2, bypass: 3, text: 3, manual: 4 };
+  // "page" outranks even a manual tick: a figure the site printed beats both
+  // a guess and your memory of when you last went.
+  const SOURCE_RANK = { refused: 1, click: 1, request: 2, bypass: 3, text: 3, manual: 4, page: 5 };
 
   // A link that performs the action rather than just navigating: it carries a
   // query string, or it is a javascript:/# control. A plain link to another
@@ -1178,6 +1246,28 @@
 
   function watchForVisit(t) {
     if (t.type === "window" && !t.cooldownMins) return;
+
+    // 0. The page states how long is left. Only Grave Danger does, and it is
+    //    better evidence than anything below, which all work backwards from
+    //    something you did; this works forwards from what the site says is
+    //    still to come. It is also the only source that fires on a visit
+    //    where you did nothing at all - an adventure already running when you
+    //    arrive is news whether or not this browser started it.
+    if (t.countdown) {
+      const left = t.countdown();
+      if (left !== null) {
+        if (left > 0) {
+          markUntil(t.id, Date.now() + left, "page");
+          // Nothing you can do while it is out there counts as a go, so the
+          // request and click watchers below are never armed.
+          return;
+        }
+        // It is back. A timer still held here over-ran (four hours was the
+        // guess, and the adventure was longer), or the adventure ended some
+        // other way; either way the row should say ready.
+        clearDone(t.id);
+      }
+    }
 
     // Jumping in outside the prize window does not start a cooldown, and the
     // page says the same thing either way — so neither does this. Asked at
