@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Monotony Spin Guard
 // @namespace    local-advisor-fork
-// @version      1.2
+// @version      1.3
 // @description  Shows a live countdown for a Wheel of Monotony spin and keeps the tab from being discarded or reloaded out from under it. Display and protection only: it never spins, donates, or claims.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/prehistoric/monotony/*
@@ -78,7 +78,6 @@
     // browsers decide "this tab is audible" from actual output, so a muted or
     // zero-gain graph does not count and buys nothing.
     holdGain: 0.0005,
-    corner: "bottom-left",
   };
 
   const STATUS_URL = "/np-templates/ajax/wheels/monotony/getSpinStatus.php";
@@ -207,13 +206,16 @@
    font on some themes, and its padding pushes it past its own width. */
 #spinguard {
   box-sizing: border-box !important;
-  position: fixed !important;
+  /* Bottom right, at the same 25px/23px the other per-activity panels in this
+     repo sit at, so a page that happens to carry two of them lines them up
+     rather than scattering them around the window. */
+  position: fixed !important; bottom: 25px !important; right: 23px !important;
   /* The premium footer bar sits at 10000-10140 and its popups raise
      themselves further, so anything lower than this gets buried. */
   z-index: 2147483646 !important;
   /* A 1280px window leaves about 140px of margin either side of the site's
      centred 1000px content column, so 150px lives in that margin instead of
-     lying over the wheel. The notes below wrap onto two or three lines rather
+     lying over the wheel. The status line wraps onto a second line rather
      than widening this, because vertical room is what the margin has. */
   width: 150px !important;
   text-align: left !important;
@@ -241,6 +243,8 @@
   padding: 5px 8px 7px !important;
   background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
 }
+/* The status line says the whole thing, consequence included, so there is no
+   second line of explanation under the clock to go stale beside it. */
 #spinguard-state { font: 11px/1.4 ${MUSEO} !important; color: #1b4f85 !important; }
 /* Proportional digits reflow the line on every tick, which is what makes a
    countdown visibly jitter. The min-width covers the longest form the value
@@ -248,14 +252,13 @@
    changes one glyph and nothing else on the badge moves. */
 #spinguard-time {
   display: block !important; min-width: 68px !important;
-  margin: 1px 0 3px !important;
+  margin: 1px 0 0 !important;
   font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas,
         "DejaVu Sans Mono", monospace !important;
   font-variant-numeric: tabular-nums !important;
   font-feature-settings: "tnum" 1 !important;
   letter-spacing: 0 !important; color: #1b4f85 !important;
 }
-#spinguard-note { font: 11px/1.35 ${MUSEO} !important; color: #4a5a6a !important; }
 /* Meridell green is the only state colour, and it goes on the header so a
    finished spin is visible from the corner of the eye. Red is kept for a
    fault, which here is a real one: a spin the server still holds that this
@@ -281,7 +284,6 @@
   let badge = null;
   let stateEl = null;
   let timeEl = null;
-  let note = null;
 
   // One <style> element, guarded by its id, so a second run of the script in
   // a frame or a re-injection does not stack the rules.
@@ -295,15 +297,9 @@
 
   function buildBadge() {
     injectStyles();
-    const [vertical, horizontal] = CONFIG.corner.split("-");
     badge = document.createElement("div");
     badge.id = "spinguard";
     badge.dataset.state = "spin";
-    // The corner is the one thing left inline, since the stylesheet sets no
-    // edge of its own: on a window too narrow to have a margin there is no
-    // corner that is out of the way, so which one is a setting.
-    badge.style.setProperty(vertical, "8px", "important");
-    badge.style.setProperty(horizontal, "8px", "important");
 
     const head = document.createElement("div");
     head.id = "spinguard-head";
@@ -319,10 +315,7 @@
     timeEl = document.createElement("span");
     timeEl.id = "spinguard-time";
 
-    note = document.createElement("div");
-    note.id = "spinguard-note";
-
-    body.append(stateEl, timeEl, note);
+    body.append(stateEl, timeEl);
     badge.appendChild(body);
     document.body.appendChild(badge);
   }
@@ -381,22 +374,22 @@
     const left = endTime - Date.now();
     if (left <= 0) {
       setState("done");
-      stateEl.textContent = "Spin finished";
+      stateEl.textContent = "Finished — claim on the wheel";
       timeEl.hidden = true;
-      note.textContent = "Claim the prize on the wheel.";
       stopTicker();
       stopClock();
       unguard();
       return;
     }
     setState("spin");
-    stateEl.textContent = "Spinning";
     timeEl.hidden = false;
     // The unload prompt is installed either way; the audio hold is what keeps
-    // an unloader off the tab, so report that specifically.
-    note.textContent = holding()
-      ? "Leave this tab loaded. A reload abandons the spin."
-      : "Not held audible - the tab may be discarded.";
+    // an unloader off the tab, so the status reports that specifically. The
+    // held line is an instruction because the only remaining risk is you; the
+    // unheld one is a warning because the browser can take the tab on its own.
+    stateEl.textContent = holding()
+      ? "Spinning — do not reload or leave"
+      : "Spinning — not held, may be discarded";
   }
 
   function stopTicker() {
@@ -459,15 +452,14 @@
       if (!badge) buildBadge();
       setState("fault");
       const left = data.endTime - Date.now();
-      stateEl.textContent =
-        left > 0 ? "Server still has a spin" : "Server has a finished spin";
+      stateEl.textContent = "Abandoned on load — refund due, spin again";
       // Not ticked, and deliberately: this figure is the leftover of a spin
       // that is already lost, so it is a reading of what the server still
-      // holds rather than a countdown to anything that can be claimed.
+      // holds rather than a countdown to anything that can be claimed. It is
+      // shown only while there is some left, since zero would read as a spin
+      // that had just finished.
       timeEl.hidden = left <= 0;
       if (left > 0) timeEl.textContent = formatRemaining(left);
-      note.textContent =
-        "This page load abandoned it, so expect a refund. Spin again.";
     }
   }
 
