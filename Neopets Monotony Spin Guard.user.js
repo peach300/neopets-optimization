@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Monotony Spin Guard
 // @namespace    local-advisor-fork
-// @version      1.1
+// @version      1.2
 // @description  Shows a live countdown for a Wheel of Monotony spin and keeps the tab from being discarded or reloaded out from under it. Display and protection only: it never spins, donates, or claims.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/prehistoric/monotony/*
@@ -178,28 +178,157 @@
 
   // ------------------------------------------------------------------ display
 
+  // The two fonts the site serves itself, so the badge reads as one of the
+  // site's own content modules rather than as an add-on. images.neopets.com
+  // sends access-control-allow-origin: *, so @font-face reaches them from a
+  // userscript with no grants - nothing to bundle and nothing to base64.
+  const FONT_HOST = "https://images.neopets.com/js/fonts";
+  const CAFETERIA = '"NPTM Cafeteria", "Cafeteria", "Arial Bold", sans-serif';
+  const MUSEO = '"NPTM Museo", "Museo Sans Rounded", Verdana, sans-serif';
+
+  // The family names are prefixed: an unprefixed "Cafeteria" would collide
+  // with whatever the site has already registered under that name, and which
+  // one wins is not worth leaving to load order. Cafeteria is sized in pt and
+  // Museo in px because that is how the site's own template.css sizes them.
+  const CSS = `
+@font-face {
+  font-family: "NPTM Cafeteria"; font-display: swap;
+  src: url("${FONT_HOST}/cafeteria-black.ttf") format("truetype");
+}
+@font-face {
+  font-family: "NPTM Museo"; font-style: normal; font-display: swap;
+  src: url("${FONT_HOST}/museosansrounded-500.woff") format("woff"),
+       url("${FONT_HOST}/museosansrounded-500.ttf") format("truetype");
+}
+/* !important on every declaration, and box-sizing on the root and all of its
+   descendants: default.css and the theme sheets set font, color and
+   text-align broadly and content-box in places, and the theme can be swapped
+   underneath us. Without these the badge inherits centred text in the wrong
+   font on some themes, and its padding pushes it past its own width. */
+#spinguard {
+  box-sizing: border-box !important;
+  position: fixed !important;
+  /* The premium footer bar sits at 10000-10140 and its popups raise
+     themselves further, so anything lower than this gets buried. */
+  z-index: 2147483646 !important;
+  /* A 1280px window leaves about 140px of margin either side of the site's
+     centred 1000px content column, so 150px lives in that margin instead of
+     lying over the wheel. The notes below wrap onto two or three lines rather
+     than widening this, because vertical room is what the margin has. */
+  width: 150px !important;
+  text-align: left !important;
+  font: 12px/1.45 ${MUSEO} !important; color: #333 !important;
+  border: 1px solid #27486d !important; border-radius: 10px !important;
+  overflow: hidden !important; background: #fff !important;
+  box-shadow: 0 2px 7px rgba(0,0,0,0.3) !important;
+}
+#spinguard * { box-sizing: border-box !important; }
+/* Hiding is one rule here, toggled with the hidden attribute, never with
+   element.style.display: an author !important declaration beats an inline
+   one, so the moment any rule above gains a display the inline form would
+   silently stop working and leave an empty line on screen. */
+#spinguard [hidden] { display: none !important; }
+#spinguard-head {
+  /* Cafeteria sits high in its box, so even vertical padding makes the label
+     look like it is falling out of the bottom. */
+  padding: 4px 8px 6px !important;
+  font: 13pt/1.1 ${CAFETERIA} !important;
+  color: #fff !important; text-shadow: 0 1px 1px rgba(0,0,0,0.35) !important;
+  background: linear-gradient(#5b9bd9, #2367B5) !important;
+  border-bottom: 1px solid #27486d !important;
+}
+#spinguard-body {
+  padding: 5px 8px 7px !important;
+  background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
+}
+#spinguard-state { font: 11px/1.4 ${MUSEO} !important; color: #1b4f85 !important; }
+/* Proportional digits reflow the line on every tick, which is what makes a
+   countdown visibly jitter. The min-width covers the longest form the value
+   takes (02:09:35 at 14px monospace is about 67px), so a passing second
+   changes one glyph and nothing else on the badge moves. */
+#spinguard-time {
+  display: block !important; min-width: 68px !important;
+  margin: 1px 0 3px !important;
+  font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        "DejaVu Sans Mono", monospace !important;
+  font-variant-numeric: tabular-nums !important;
+  font-feature-settings: "tnum" 1 !important;
+  letter-spacing: 0 !important; color: #1b4f85 !important;
+}
+#spinguard-note { font: 11px/1.35 ${MUSEO} !important; color: #4a5a6a !important; }
+/* Meridell green is the only state colour, and it goes on the header so a
+   finished spin is visible from the corner of the eye. Red is kept for a
+   fault, which here is a real one: a spin the server still holds that this
+   page load has already lost. The fault header gradient is derived from the
+   palette's fault border rather than being a colour of its own. */
+#spinguard[data-state="done"] { border-color: #14543a !important; }
+#spinguard[data-state="done"] #spinguard-head {
+  background: linear-gradient(#2fa86f, #1d774f) !important;
+  border-bottom-color: #14543a !important;
+}
+#spinguard[data-state="done"] #spinguard-body { background: #e9f8ef !important; }
+#spinguard[data-state="done"] #spinguard-state,
+#spinguard[data-state="done"] #spinguard-time { color: #156141 !important; }
+#spinguard[data-state="fault"] { border-color: #a94442 !important; }
+#spinguard[data-state="fault"] #spinguard-head {
+  background: linear-gradient(#c96866, #a94442) !important;
+  border-bottom-color: #7a2b2b !important;
+}
+#spinguard[data-state="fault"] #spinguard-state,
+#spinguard[data-state="fault"] #spinguard-time { color: #7a2b2b !important; }
+`;
+
   let badge = null;
-  let line = null;
+  let stateEl = null;
+  let timeEl = null;
   let note = null;
 
+  // One <style> element, guarded by its id, so a second run of the script in
+  // a frame or a re-injection does not stack the rules.
+  function injectStyles() {
+    if (document.getElementById("spinguard-style")) return;
+    const el = document.createElement("style");
+    el.id = "spinguard-style";
+    el.textContent = CSS;
+    (document.body || document.documentElement).appendChild(el);
+  }
+
   function buildBadge() {
+    injectStyles();
     const [vertical, horizontal] = CONFIG.corner.split("-");
     badge = document.createElement("div");
-    badge.style.cssText =
-      `position: fixed; ${vertical}: 8px; ${horizontal}: 8px;` +
-      ` z-index: 2147483646; padding: 6px 10px; border-radius: 4px;` +
-      ` border: 1px solid #555; background: #fffbe6; color: #222;` +
-      ` font: 11px/1.5 Verdana, sans-serif; max-width: 260px;`;
+    badge.id = "spinguard";
+    badge.dataset.state = "spin";
+    // The corner is the one thing left inline, since the stylesheet sets no
+    // edge of its own: on a window too narrow to have a margin there is no
+    // corner that is out of the way, so which one is a setting.
+    badge.style.setProperty(vertical, "8px", "important");
+    badge.style.setProperty(horizontal, "8px", "important");
 
-    line = document.createElement("div");
-    line.style.fontWeight = "bold";
-    badge.appendChild(line);
+    const head = document.createElement("div");
+    head.id = "spinguard-head";
+    head.textContent = "Spin Guard";
+    badge.appendChild(head);
+
+    const body = document.createElement("div");
+    body.id = "spinguard-body";
+
+    stateEl = document.createElement("div");
+    stateEl.id = "spinguard-state";
+
+    timeEl = document.createElement("span");
+    timeEl.id = "spinguard-time";
 
     note = document.createElement("div");
-    note.style.cssText = "margin-top: 3px; opacity: 0.8;";
-    badge.appendChild(note);
+    note.id = "spinguard-note";
 
+    body.append(stateEl, timeEl, note);
+    badge.appendChild(body);
     document.body.appendChild(badge);
+  }
+
+  function setState(state) {
+    if (badge && badge.dataset.state !== state) badge.dataset.state = state;
   }
 
   function formatRemaining(ms) {
@@ -213,23 +342,61 @@
     );
   }
 
+  // Two clocks, because the work timer and the readout want opposite things.
+  // A browser throttles a background tab's timers to roughly once a minute
+  // whatever period is asked for, so the work below has to tolerate a long
+  // one; the digits want the refresh rate, and repainting them from the work
+  // timer lands them at irregular offsets, which reads as choppiness even
+  // though the arithmetic behind them is right.
+  let frame = 0;
+
+  function paintClock() {
+    frame = 0;
+    if (!endTime) return;
+    const text = formatRemaining(endTime - Date.now());
+    // This guard is what makes sixty frames a second cheap: the text changes
+    // once a second, so fifty-nine of them do nothing at all.
+    if (timeEl.textContent !== text) timeEl.textContent = text;
+    frame = requestAnimationFrame(paintClock);
+  }
+
+  function startClock() {
+    if (!frame) paintClock();
+  }
+
+  function stopClock() {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+  }
+
+  // A hidden tab does not fire requestAnimationFrame at all, so the loop dies
+  // on a tab switch and has to be restarted by hand; without this the readout
+  // sits frozen on whatever it last painted. The spin itself is unaffected -
+  // the wheel recomputes its own remaining duration from the wall clock.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && endTime && Date.now() < endTime) startClock();
+  });
+
   function render() {
     const left = endTime - Date.now();
     if (left <= 0) {
-      line.textContent = "Spin finished";
+      setState("done");
+      stateEl.textContent = "Spin finished";
+      timeEl.hidden = true;
       note.textContent = "Claim the prize on the wheel.";
-      badge.style.borderColor = "#1a9850";
-      badge.style.background = "#eaf7ea";
       stopTicker();
+      stopClock();
       unguard();
       return;
     }
-    line.textContent = `Spinning — ${formatRemaining(left)} left`;
+    setState("spin");
+    stateEl.textContent = "Spinning";
+    timeEl.hidden = false;
     // The unload prompt is installed either way; the audio hold is what keeps
     // an unloader off the tab, so report that specifically.
     note.textContent = holding()
       ? "Leave this tab loaded. A reload abandons the spin."
-      : "Not held audible — the tab may be discarded.";
+      : "Not held audible - the tab may be discarded.";
   }
 
   function stopTicker() {
@@ -244,6 +411,7 @@
   function startTicker() {
     stopTicker();
     render();
+    startClock();
     ticker = setInterval(render, 1000);
   }
 
@@ -289,15 +457,17 @@
 
     if (data.isSpinning && typeof data.endTime === "number") {
       if (!badge) buildBadge();
+      setState("fault");
       const left = data.endTime - Date.now();
-      line.textContent =
-        left > 0
-          ? `Server still has a spin: ${formatRemaining(left)} left`
-          : "Server has a finished spin";
+      stateEl.textContent =
+        left > 0 ? "Server still has a spin" : "Server has a finished spin";
+      // Not ticked, and deliberately: this figure is the leftover of a spin
+      // that is already lost, so it is a reading of what the server still
+      // holds rather than a countdown to anything that can be claimed.
+      timeEl.hidden = left <= 0;
+      if (left > 0) timeEl.textContent = formatRemaining(left);
       note.textContent =
         "This page load abandoned it, so expect a refund. Spin again.";
-      badge.style.borderColor = "#d73027";
-      badge.style.background = "#fff0f0";
     }
   }
 
