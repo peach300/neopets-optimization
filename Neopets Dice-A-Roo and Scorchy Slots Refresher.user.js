@@ -792,6 +792,27 @@
 
   // kind is "bored" for a run that reached what it was for, "stop" for anything
   // else. Only the panel's colour and wording turn on it; both end the run.
+  // One play, charged. The count, the round, the bill and the rate window all
+  // move together, and they were written out at three call sites that had
+  // drifted into three slightly different shapes - the kind of duplication
+  // that eventually bills someone twice.
+  //
+  // Written before the play is sent or the click lands, deliberately: a play
+  // that was sent counts whether or not its answer comes back, and the money
+  // has gone either way.
+  //
+  // `startsGame` is what the 5 NP is actually charged for - a Dice-A-Roo roll
+  // is free, entering is not. `inRound` is false for the background path,
+  // where the loop counts its own plays rather than writing the figure to the
+  // store for the next page load to pick up.
+  function chargeOnePlay({ startsGame, inRound = true }) {
+    state.plays += 1;
+    if (inRound) state.burstLeft -= 1;
+    if (startsGame) state.games += 1;
+    state.recent.push(Date.now());
+    save();
+  }
+
   function halt(note, kind) {
     state.running = false;
     state.nextAt = 0;
@@ -1120,12 +1141,11 @@
       return { note: "Stopped: nothing offers another play.", kind: "stop" };
     }
 
-    // Counted before the request, not after: a play that was sent counts
-    // whether or not its answer arrives, and the cost is incurred either way.
-    state.plays += 1;
-    if (plan || (entry.entryForm && entry.entryForm(nextForm))) state.games += 1;
-    state.recent.push(Date.now());
-    save();
+    chargeOnePlay({
+      startsGame: !!(plan || (entry.entryForm && entry.entryForm(nextForm))),
+      // The round is this loop, not a figure carried across a page load.
+      inRound: false,
+    });
 
     const got = await fetchDoc(req.url, req.init);
     if (got.status >= 400) {
@@ -1362,14 +1382,12 @@
     }
 
     if (playBtn && CONFIG.SUBMIT_TO_PLAY) {
-      // Counted and charged before the click, because the click navigates and
-      // nothing after it runs. The round's remaining count goes with it, so
-      // the page this lands on knows it is mid-round.
-      state.plays += 1;
-      state.burstLeft -= 1;
-      if (entry.entryForm && entry.entryForm(pageForm)) state.games += 1;
-      state.recent.push(Date.now());
-      save();
+      // Charged before the click, because the click navigates and nothing
+      // after it runs. The round's remaining count goes with it, so the page
+      // this lands on knows it is mid-round.
+      chargeOnePlay({
+        startsGame: !!(entry.entryForm && entry.entryForm(pageForm)),
+      });
       console.info(`${TAG} ${game}: play ${state.plays}, ${state.burstLeft} left in round`);
       playBtn.click();
       return;
@@ -1384,11 +1402,7 @@
     if (plan && CONFIG.SUBMIT_TO_PLAY) {
       // Game Over, with a token to re-enter on. This starts a game, so it is
       // charged and counted exactly like a roll.
-      state.plays += 1;
-      state.burstLeft -= 1;
-      state.games += 1;
-      state.recent.push(Date.now());
-      save();
+      chargeOnePlay({ startsGame: true });
       console.info(`${TAG} ${game}: new game, play ${state.plays}`);
       postNav(plan);
       return;

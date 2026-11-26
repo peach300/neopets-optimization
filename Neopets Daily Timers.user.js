@@ -3135,18 +3135,7 @@
 
     sheet = document.createElement("div");
     sheet.id = "nptm-settings";
-
-    const header = document.createElement("header");
-    const hTitle = document.createElement("span");
-    hTitle.textContent = "Timers to track";
-    header.appendChild(hTitle);
-    const close = document.createElement("button");
-    close.id = "nptm-close";
-    close.type = "button";
-    close.innerHTML = CLOSE_SVG;
-    close.addEventListener("click", closeSettings);
-    header.appendChild(close);
-    sheet.appendChild(header);
+    sheet.appendChild(buildSettingsHeader());
 
     const scroll = document.createElement("div");
     scroll.className = "nptm-scroll";
@@ -3157,7 +3146,45 @@
     gHead.textContent = "Panel";
     scroll.appendChild(gHead);
     scroll.appendChild(globals);
+    buildGlobalOptions(globals);
+    buildWindowFields(globals);
+    buildCornerPicker(globals);
 
+    buildTrackerList(scroll);
+    sheet.appendChild(scroll);
+    sheet.appendChild(buildSettingsFooter());
+
+    document.body.appendChild(sheet);
+  }
+
+  // Save, rebuild the sheet, repaint the panel. The sheet is rebuilt rather
+  // than patched because its list is built from orderedTrackers() once, so
+  // reopening is how a changed order comes back.
+  function applyAndReopen() {
+    saveSettings();
+    closeSettings();
+    openSettings();
+    render();
+  }
+
+
+  // The sheet's own furniture: a title and the one control that closes it.
+  function buildSettingsHeader() {
+    const header = document.createElement("header");
+    const hTitle = document.createElement("span");
+    hTitle.textContent = "Timers to track";
+    header.appendChild(hTitle);
+    const close = document.createElement("button");
+    close.id = "nptm-close";
+    close.type = "button";
+    close.innerHTML = CLOSE_SVG;
+    close.addEventListener("click", closeSettings);
+    header.appendChild(close);
+    return header;
+  }
+
+  // The options that change what the panel does rather than what it lists.
+  function buildGlobalOptions(globals) {
     const addGlobal = (key, label, hint, onEnable) => {
       const row = document.createElement("label");
       row.className = "nptm-opt";
@@ -3223,7 +3250,9 @@
       "Use direct links where the real page is broken",
       "Coconut Shy, Bagatelle, Expellibox",
     );
+  }
 
+  function buildWindowFields(globals) {
     // A field per tracker whose window has to be told to us, with a link to
     // wherever it is published. Only the Symol Hole has one; it is built from
     // the registry so a second would need no new code here.
@@ -3300,7 +3329,11 @@
 
       globals.appendChild(row);
     }
+  }
 
+  // Which corner the panel sits in. A select rather than four radios: it
+  // is one answer out of four and nobody compares them.
+  function buildCornerPicker(globals) {
     const cornerRow = document.createElement("label");
     cornerRow.className = "nptm-opt";
     const cornerName = document.createElement("span");
@@ -3325,7 +3358,9 @@
     });
     cornerRow.appendChild(cornerSel);
     globals.appendChild(cornerRow);
+  }
 
+  function buildTrackerList(scroll) {
     // One list, in your order, each row a checkbox plus its own bell.
     //
     // It used to be a section per category - Freebies, Wheels, Quests and the
@@ -3450,9 +3485,12 @@
         list.appendChild(row);
       }
     }
+  }
 
-    sheet.appendChild(scroll);
-
+  // Default, Default order, None and Done. The first three all end the
+  // same way - save, redraw the sheet, redraw the panel - which is what
+  // applyAndReopen is.
+  function buildSettingsFooter() {
     const footer = document.createElement("footer");
     const mkBtn = (text, fn) => {
       const b = document.createElement("button");
@@ -3472,10 +3510,7 @@
             settings.alerts[t.id] = true;
           }
         });
-        saveSettings();
-        closeSettings();
-        openSettings();
-        render();
+        applyAndReopen();
       }),
     );
     footer.appendChild(
@@ -3487,13 +3522,7 @@
         // later update then lands where Jellyneo puts it, instead of at the
         // end of a copy of the list made today.
         settings.order = [];
-        saveSettings();
-        // Reopened rather than re-sorted in place, which is what the two
-        // buttons beside this one do: the list is built from orderedTrackers()
-        // once, so rebuilding the sheet is how it comes back in the new order.
-        closeSettings();
-        openSettings();
-        render();
+        applyAndReopen();
       }),
     );
     footer.appendChild(
@@ -3505,16 +3534,11 @@
         TRACKERS.forEach((t) => {
           settings.enabled[t.id] = false;
         });
-        saveSettings();
-        closeSettings();
-        openSettings();
-        render();
+        applyAndReopen();
       }),
     );
     footer.appendChild(mkBtn("Done", closeSettings));
-    sheet.appendChild(footer);
-
-    document.body.appendChild(sheet);
+    return footer;
   }
 
   // --------------------------------------------------------------------- wire
