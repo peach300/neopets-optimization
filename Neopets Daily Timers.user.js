@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.3
+// @version      2.4
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -21,8 +21,18 @@
 // The Healing Springs countdown in this folder, generalised. Neopets has
 // dozens of activities on a clock and tells you the remaining time for almost
 // none of them, so the clock is kept here instead: one panel, a row per
-// activity you have switched on, in Jellyneo's dailies order until you drag
-// it into your own.
+// activity you have switched on, soonest first.
+//
+// THE ORDER THE ROWS COME IN
+//
+// What is ready sits at the top, then what is closest to being ready, and
+// your own order decides only between rows that come back at the same time -
+// which, for the dozen rows that all reset at midnight NST, is all of them.
+// So the drag order in the settings still does the work it always did, on the
+// group where it is the only thing left to go on, and the top of the panel is
+// the part worth reading. Before this the list was fixed: Jellyneo's dailies
+// order, or yours, with the ready rows scattered through it and the ones
+// twelve hours out at the top.
 //
 // The cadences come from Jellyneo's dailies list (jellyneo.net/?go=dailies),
 // read on 2026-11-18. Three kinds are tracked, because three kinds is what
@@ -212,6 +222,15 @@
   //   breaks / breakWords: hours in the NST day when the activity is shut and
   //       the row cannot be done at all, as [startHour, endHour), plus the
   //       words for it. Both kings take three of them.
+  //   settled(): read the page and answer whether the whole thing is finished
+  //       - true, false, or null for "this page cannot tell". Only the Quest
+  //       Log has one, because it is the only row where a single click is a
+  //       fraction of the day rather than the day. It outranks everything
+  //       else and it is the only source that can also un-finish a row.
+  //   counter(): read the day's allowance off the page as {used, total}, the
+  //       site's own figure rather than a tally kept here. hideCount keeps
+  //       that figure out of the clock column, leaving the row to read Ready
+  //       until it reaches the total.
   //   resetsIn / resetsAt / spanWords / everyWords: an allowance that does not
   //       run on the NST day. Only the Wishing Well does not: its seven wishes
   //       run to the next grant rather than to midnight, so it brings its own
@@ -639,7 +658,51 @@
     { id: "caverns", name: "Faerie Caverns", path: "/faerieland/caverns/", type: "daily", note: "Up to twice a day." },
     { id: "bank", name: "Bank Interest", path: "/bank.phtml", type: "daily", on: true },
 
-    { id: "questlog", name: "Quest Log", path: "/questlog/", type: "daily", on: true },
+    // The Quest Log is not a daily you do once; it is five quests, a bonus, a
+    // streak and a second tabful of NeoPass quests, and it is finished when
+    // every reward on both tabs has been claimed. A click or an AJAX call
+    // would tick the row off on the first claim of six, which is why the
+    // hub's own AJAX is in NOISE_RE and why this row reads the page instead.
+    //
+    // Read from the DOM rather than from window.__questLogConfig: that object
+    // is the page as it was served, and the Vue app deep-clones it, so it
+    // never changes as you claim. The rendered hub does, on both paths - a
+    // Premium auto-claim leaves the card in place with ql-quest-claimed on
+    // it, and a manual claim splices the card out of the list altogether.
+    {
+      id: "questlog",
+      name: "Quest Log",
+      path: "/questlog/",
+      type: "daily",
+      on: true,
+      note: "Finished when every reward is claimed, on the Daily Quests tab and the NeoPass one.",
+      settled() {
+        // The quest list itself, which is only there once the app has
+        // rendered. Empty is a real answer (every card claimed and removed);
+        // absent is not.
+        const box = document.getElementById("QuestLogQuests");
+        if (!box) return null;
+        let left = 0;
+        for (const card of box.querySelectorAll(".questlog-quest")) {
+          if (!card.classList.contains("ql-quest-claimed")) left += 1;
+        }
+        // The bonus and the streaks, whose Claim control only exists while
+        // one is earned and unclaimed. A streak still weeks off carries no
+        // such control, so it cannot hold the row open.
+        left += document.querySelectorAll(".ql-bonus-claim").length;
+        // The other tab, as its own badge. Only the inactive ones: the badge
+        // is a figure from the server and is refreshed when you switch tabs
+        // or reload, not when you claim, so the active tab's own badge can
+        // sit there stale while its cards say otherwise - and its cards are
+        // the better evidence anyway.
+        for (const tab of document.querySelectorAll(".questlog-tabs .questlog-tab")) {
+          if (tab.classList.contains("tab-active")) continue;
+          const badge = tab.querySelector(".ql-notif");
+          left += Number((badge?.textContent || "").replace(/\D+/g, "")) || 0;
+        }
+        return left === 0;
+      },
+    },
     { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
     { id: "petpetlab", name: "Petpet Lab Ray", path: "/petpetlab.phtml", type: "daily" },
     { id: "coincidence", name: "The Coincidence", path: "/space/coincidence.phtml", type: "daily" },
@@ -677,6 +740,14 @@
       uses: 15,
       on: true,
       note: "15\u201320 item drops a day (Premium adds 5), reset at midnight NST.",
+      // The figure is read, but not printed where the clock goes. "1/20" in
+      // that column read as a countdown to something and is not one: nothing
+      // about the Battledome is rationed by it, and the only moment the
+      // number matters is the one where it reaches the cap and the drops stop
+      // - which the row already says in words. So the row reads Ready until
+      // used reaches the total the page itself gives (15 without Premium, 20
+      // with), and the running figure stays in the tooltip.
+      hideCount: true,
       counter() {
         // The page's own object first: arena.phtml exposes it as
         // window.battleDomeLimits(), and a number needs no parsing. This
@@ -1314,6 +1385,7 @@
     bypass: "you opened the direct link",
     manual: "you marked it done",
     page: "the page's own countdown",
+    settled: "the page says it is finished",
   };
 
   function rowState(t) {
@@ -1377,7 +1449,9 @@
           return {
             ready: true,
             ms: 0,
-            text: `${live.count}/${live.total}`,
+            // undefined rather than the figure for a row that does not want
+            // it on the clock; timeText falls through to "Ready".
+            text: t.hideCount ? undefined : `${live.count}/${live.total}`,
             label: `${live.count} of ${allowanceSpan(t)}'s ${live.total} taken`
               + " \u2014 read from the page",
             kind: "allowance",
@@ -1433,6 +1507,10 @@
       if (minute === null) {
         return {
           ready: false,
+          // Not ready, but waiting on you rather than on a clock - which is
+          // why it is listed even when the panel is set to show only what is
+          // ready. See the filter in render().
+          needsYou: true,
           ms: 0,
           text: "set",
           label:
@@ -1495,6 +1573,28 @@
       return base + DEFAULT_ORDER.length + TRACKERS.indexOf(t);
     };
     return [...TRACKERS].sort((a, b) => place(a) - place(b));
+  }
+
+  // What the panel lists, in the order it lists them: soonest first, with
+  // your own order used only between rows that come back at the same time.
+  //
+  // Ready rows sort above everything as a group, and inside that group there
+  // is nothing left to sort by but your order - which is the right answer for
+  // a handful of rows all waiting on you equally.
+  //
+  // The wait is bucketed to the minute rather than compared outright. Every
+  // row that resets at midnight NST is within a few seconds of every other
+  // one, and those seconds are nothing but the order you happened to tick
+  // them off in; sorting on them would shuffle a dozen rows against each
+  // other every day for a difference no reader could see. A minute is coarse
+  // enough to leave that midnight cohort in the order you dragged it into,
+  // and fine enough that anything genuinely sooner still sits above it.
+  function sortForPanel(rows) {
+    const place = new Map(orderedTrackers().map((t, i) => [t.id, i]));
+    const soon = ({ st }) => (st.ready ? -1 : Math.max(0, Math.round(st.ms / 60_000)));
+    return [...rows].sort(
+      (a, b) => soon(a) - soon(b) || place.get(a.t.id) - place.get(b.t.id),
+    );
   }
 
   function activeTrackers() {
@@ -1581,7 +1681,12 @@
   // click cannot downgrade a reading taken from the page's own text.
   // "page" outranks even a manual tick: a figure the site printed beats both
   // a guess and your memory of when you last went.
-  const SOURCE_RANK = { refused: 1, click: 1, request: 2, bypass: 3, text: 3, manual: 4, page: 5 };
+  const SOURCE_RANK = {
+    refused: 1, click: 1, request: 2, bypass: 3, text: 3, manual: 4,
+    // Both of these are the site's own account of the row - a countdown it
+    // printed, or its own data read back - so they outrank your memory.
+    page: 5, settled: 5,
+  };
 
   // A link that performs the action rather than just navigating: it carries a
   // query string, or it is a javascript:/# control. A plain link to another
@@ -1658,6 +1763,33 @@
       setInterval(read, 5000);
       // Nothing below is armed. A click in the arena is not a drop, and the
       // page is about to say what the real number is anyway.
+      return;
+    }
+
+    // 0c. The page says whether the day is finished, rather than leaving it
+    //     to be inferred from something you did. Only the Quest Log does, and
+    //     it is the only row where "you clicked a thing" is actively wrong:
+    //     one claim out of six is not the day.
+    //
+    //     It answers both ways, which the sources below cannot. A row the
+    //     page says is unfinished has its stored timer cleared, so ticking it
+    //     off by hand and then opening the hub with a quest still unclaimed
+    //     puts the row back - the page outranks your memory, as it does
+    //     everywhere else (see SOURCE_RANK).
+    if (t.settled) {
+      const read = () => {
+        const got = t.settled();
+        if (got === true) markDone(t.id, "settled");
+        // Only when there is something to clear, or this would rewrite the
+        // store every few seconds for as long as the hub is open.
+        else if (got === false && readStates()[t.id]) clearDone(t.id);
+      };
+      read();
+      // Re-read, like the counter above: claiming happens over AJAX and the
+      // hub never reloads around it, so the one reading taken at load time
+      // would be the state before you claimed anything.
+      setInterval(read, 5000);
+      // Nothing below is armed - a click in the hub is not the day.
       return;
     }
 
@@ -2694,9 +2826,16 @@
   function render() {
     if (!panel) buildPanel();
 
-    const rows = activeTrackers()
-      .map((t) => ({ t, st: rowState(t) }))
-      .filter(({ st }) => !settings.readyOnly || st.ready);
+    // `needsYou` survives the ready-only filter. Symol Hole with no window
+    // set yet is the case: it is not ready, it is not counting down to
+    // anything either, and it is waiting on you to go and read today's minute
+    // off Jellyneo - so a list of what wants doing that leaves it out is
+    // hiding the one row you could act on.
+    const rows = sortForPanel(
+      activeTrackers()
+        .map((t) => ({ t, st: rowState(t) }))
+        .filter(({ st }) => !settings.readyOnly || st.ready || st.needsYou),
+    );
 
     const ready = rows.filter(({ st }) => st.ready);
     panel.dataset.anyReady = ready.length ? "1" : "0";
