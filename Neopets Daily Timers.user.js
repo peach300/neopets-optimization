@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.6
+// @version      2.7
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -238,9 +238,11 @@
   //       - true, false, or null for "this page cannot tell". Only the Quest
   //       Log has one, because it is the only row where a single click is a
   //       fraction of the day rather than the day. It outranks everything
-  //       else and it is the only source that can also un-finish a row. It
-  //       may also keep its own notes between visits, as that one does: see
-  //       "the Quest Log's day" below.
+  //       else and it is the only source that can also un-finish a row. A
+  //       string in place of true means finished, in the row's own words,
+  //       which is how Faerie Quests says "no Fortune Cookie active" rather
+  //       than claiming you did something. It may also keep its own notes
+  //       between visits, as the Quest Log does: see "the Quest Log's day".
   //   counter(): read the day's allowance off the page as {used, total}, the
   //       site's own figure rather than a tally kept here. hideCount keeps
   //       that figure out of the clock column, leaving the row to read Ready
@@ -862,6 +864,48 @@
       },
     },
 
+    // A Faerie Quest is normally a Random Event, which is why no row here
+    // tracks one - a countdown to something with no schedule is a made-up
+    // number. The Fortune Cookie is the exception: it is bought from the NC
+    // Mall and gives one quest a day for a week, which is a day's allowance
+    // like any other, and the quests page carries the cookie's own banner
+    // saying whether today's has been taken.
+    {
+      id: "faeriequest",
+      name: "Faerie Quests",
+      path: "/quests.phtml",
+      type: "daily",
+      on: true,
+      note: "A Faerie Quest Fortune Cookie gives one quest a day. This row is that banner's own answer, and says so when no cookie is active.",
+      settled() {
+        // The cookie's banner, which the quests page carries only while a
+        // cookie is live. Its absence is an answer rather than a failure to
+        // read: no cookie, nothing to accept, and the row stands down for the
+        // day with those words rather than claiming you did something.
+        //
+        // The banner is skinned per cookie type (lq_faeriequest here, and
+        // lq_faeriequest_dlx for the deluxe one), so the class is deliberately
+        // not matched - only the shared wrapper, on a path that is the faerie
+        // quests page anyway.
+        //
+        // Buy a cookie later the same day and this is briefly wrong: the row
+        // is already stood down and nothing will say otherwise until you open
+        // the page, which then reads the new banner and puts the row back. The
+        // alternative - a row that says Ready to everyone who owns no cookie,
+        // every day, for ever - is wrong far more often.
+        if (!document.querySelector(".fc-banner-header")) {
+          return "no Fortune Cookie, so nothing to accept";
+        }
+        // "Accept Today's Quest" is rendered only while today's quest can
+        // still be claimed, so its presence is the whole reading. The page's
+        // own script intercepts that button and posts to accept.php without a
+        // reload, replacing the banner with a fresh copy - which the re-read
+        // picks up a few seconds later.
+        if (document.getElementById("fq-fc-accept")) return false;
+        return "today's quest has been accepted";
+      },
+    },
+
     {
       id: "snowager",
       name: "Snowager",
@@ -888,7 +932,8 @@
   // later update - keep their registry place at the end rather than jumping
   // to the top, and a dragged order in the settings beats this entirely.
   const DEFAULT_ORDER = [
-    "bank", "questlog", "dome", "trudy", "grundo", "fishing", "anchor",
+    "bank", "questlog", "faeriequest", "dome", "trudy", "grundo", "fishing",
+    "anchor",
     "applebobbing", "shrine", "council", "desertedtomb", "shopofoffers",
     "caverns", "lostinthedark", "forgottenshore", "fruitmachine", "jelly",
     "omelette", "gravedanger", "tombola", "springs", "neggcave", "wiseking",
@@ -959,6 +1004,7 @@
     caverns: "items/bg_faerie_caverns.gif",
     bank: "items/ltoo_scorch_bank.gif",
     questlog: "items/toy_hannah_action.gif",
+    faeriequest: "items/mall_fortcookie_4.gif",
     lab: "items/labmap_09.gif",
     petpetlab: "items/petpetlab_soot.gif",
     coincidence: "items/rpp_reu2014_robotassispetpet.gif",
@@ -1066,7 +1112,7 @@
   // only overwritten by an equal or better source, so the page's own text or
   // request wins over a stray click, and a click that lands after them does
   // not restart the clock from scratch.
-  function markDone(id, src = "manual") {
+  function markDone(id, src = "manual", why = "") {
     const t = BY_ID.get(id);
     if (!t) return;
     // A plain window row has nothing to record; one with a cooldown does.
@@ -1100,8 +1146,11 @@
         ? msUntilNstMidnight()
         : (t.cooldownMins || t.mins) * 60_000;
     states[id] = { endTime: Date.now() + until, src };
+    // The row's own account of why it is standing down, where the source
+    // label would be too vague to be useful. Only settled() sets one.
+    if (why) states[id].why = why;
     writeStates(states);
-    console.info(`${TAG} ${id}: marked done (${src})`);
+    console.info(`${TAG} ${id}: marked done (${why || src})`);
   }
 
   // The activity has said exactly when it will be back, rather than leaving
@@ -1409,7 +1458,8 @@
         return {
           ready: false,
           ms: done.endTime - Date.now(),
-          label: `done today (${SOURCE_LABEL[done.src] || "marked"}) \u2014 resets at midnight NST`,
+          label: (done.why || `done today (${SOURCE_LABEL[done.src] || "marked"})`)
+            + " \u2014 resets at midnight NST",
           kind: "daily",
         };
       }
@@ -1882,10 +1932,20 @@
     if (t.settled) {
       const read = () => {
         const got = t.settled();
-        if (got === true) markDone(t.id, "settled");
-        // Only when there is something to clear, or this would rewrite the
-        // store every few seconds for as long as the hub is open.
-        else if (got === false && readStates()[t.id]) clearDone(t.id);
+        const held = readStates()[t.id];
+        const live = held && held.endTime > Date.now();
+        if (got === true || typeof got === "string") {
+          // A string is a yes that brought its own words for the row.
+          const why = typeof got === "string" ? got : "";
+          // The page says the same thing on every read, and this is re-read
+          // every few seconds; without this the store and the console would
+          // churn for as long as the page is open.
+          if (live && held.src === "settled" && (held.why || "") === why) return;
+          markDone(t.id, "settled", why);
+        } else if (got === false && live) {
+          // Likewise: only when there is actually something to clear.
+          clearDone(t.id);
+        }
       };
       read();
       // Re-read, like the counter above: claiming happens over AJAX and the
