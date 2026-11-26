@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Wishing Well
 // @namespace    local-advisor-fork
-// @version      1.1
+// @version      1.2
 // @description  Wishes at the Wishing Well for you, naming an item the well has actually granted lately, up to the seven a twelve-hour window allows. It submits the well's own form and spends 22 NP a wish; SUBMIT_WISHES false fills the form and leaves the click to you.
 // @author       Austin Ryder
 // @contributor  Auto-Wisher by @dogwithglasses (Greasy Fork 532440, MIT); this is a restyled fork
@@ -45,9 +45,26 @@
 //     number, it is the one that matters, and it drops back to zero when the
 //     window rolls over. Where it can be read, it wins outright.
 //   - This script, in localStorage, as a fallback for a page that does not
-//     print it. A twelve-hour clock from the first wish of the window resets
-//     that fallback, so a stuck local count cannot keep the panel saying Done
-//     forever.
+//     print it, cleared when the window it belongs to ends.
+//
+// WHEN THE WINDOW ENDS
+//
+// Not twelve hours after your first wish. That is what this script used to
+// count, and it is why the panel could sit on Done through a window that had
+// already rolled over. Jellyneo's Wishing Well page: wishes are granted twice
+// a day, twelve hours apart, at around 8:00 AM and 8:00 PM NST — the well's
+// own page claiming four times a day is wrong — and the moment they are
+// granted every ungranted wish from the previous twelve hours is wiped and the
+// well starts from a clean slate. So the boundary is on the clock and not on
+// you: a wish made at 7:55am NST belongs to a window with five minutes left in
+// it, not to one running until 7:55pm.
+//
+// The 8:00 is approximate twice over — Jellyneo read it in February 2026 and
+// says it drifts a few seconds later every day — so the local count is held
+// past the hour by GRANT_GRACE_MS before the window is called over. Being late
+// costs nothing: the panel says Done a little longer, and the well's own page
+// overrules it with "Wish Count: 0" the moment it is opened. Being early would
+// send an eighth wish into a window that is still running.
 //
 // A wish costs 22 NP. The well's minimum is 21; the extra Neopoint is the
 // original's, and it is kept because the rounder number is easier to spot in a
@@ -105,7 +122,12 @@
   // the site allows; 21 NP is its minimum donation, and 22 is what this script
   // sends (see the header). A bigger number here would buy refusals.
   const MAX_WISHES = 7;
-  const WINDOW_MS = 12 * 60 * 60 * 1000;
+  // The two NST hours the well grants on, and how long past one of them the
+  // local count is held before the window is treated as over. The hour itself
+  // is approximate and drifting (see the header), so the margin is wide, and
+  // wide in the one direction that is free to be wrong in.
+  const GRANT_HOURS = [8, 20];
+  const GRANT_GRACE_MS = 45 * 60 * 1000;
   const DONATION = 22;
   // The wish box's own maxlength. An item name longer than this is sent
   // truncated by the browser anyway, so it is truncated here too rather than
@@ -134,7 +156,7 @@
   const BLANK = {
     running: false,
     count: 0,          // wishes this script believes you have made this window
-    windowStart: 0,    // ms, the first wish of the window, for the 12h fallback
+    windowEnd: 0,      // ms, when the window this count belongs to rolls over
   };
 
   function load() {
@@ -163,6 +185,42 @@
 
   // ------------------------------------------------------------- the counting
 
+  // NST is US Pacific, so the grant hours are read off that clock and not off
+  // whichever one the browser is sitting in.
+  function nstSecondsIntoDay(when = new Date()) {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const got = {};
+    for (const p of fmt.formatToParts(when)) got[p.type] = p.value;
+    return (Number(got.hour) % 24) * 3600 + Number(got.minute) * 60 + Number(got.second);
+  }
+
+  // The next time the well wipes its slate, grace included. Counted forward in
+  // real milliseconds from where the NST clock currently stands, which on the
+  // two days a year that clock jumps an hour lands an hour out — inside the
+  // grace, and overruled by the page's own count in any case.
+  function nextGrantAt(when = Date.now()) {
+    const secs = nstSecondsIntoDay(new Date(when));
+    const marks = GRANT_HOURS.map((h) => h * 3600 + GRANT_GRACE_MS / 1000);
+    for (const mark of marks) if (secs < mark) return when + (mark - secs) * 1000;
+    return when + (86400 - secs + marks[0]) * 1000;
+  }
+
+  // Rough on purpose: the grant time is approximate, so a readout to the
+  // second would be claiming a precision nobody outside TNT has.
+  function gapWords(ms) {
+    const mins = Math.max(0, Math.round(ms / 60000));
+    if (mins < 60) return `about ${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `about ${h}h ${m}m` : `about ${h}h`;
+  }
+
   // The server's own number, printed on the page as "Wish Count: N".
   function serverCount() {
     const el = [...document.querySelectorAll("b")]
@@ -172,7 +230,7 @@
 
   // Reconcile what we think with what the page says. The server wins wherever
   // it speaks, because it is the only one of the two that decides anything;
-  // the twelve-hour clock is only here for the page that does not say.
+  // the window clock is only here for the page that does not say.
   function syncCount() {
     const said = serverCount();
     if (said !== null) {
@@ -180,11 +238,14 @@
         console.info(`${TAG} server says ${said} wish${said === 1 ? "" : "es"} this window`);
       }
       state.count = said;
-    } else if (state.windowStart && Date.now() - state.windowStart >= WINDOW_MS) {
-      console.info(`${TAG} twelve hours since the first wish; counting from zero again`);
+    } else if (state.windowEnd && Date.now() >= state.windowEnd) {
+      console.info(`${TAG} that count's window has been granted out; counting from zero again`);
       state.count = 0;
     }
-    if (state.count === 0) state.windowStart = 0;
+    if (state.count === 0) state.windowEnd = 0;
+    // A count read off the page needs a window of its own to expire with, or
+    // the next page that prints no count has nothing to clear it by.
+    else if (!state.windowEnd) state.windowEnd = nextGrantAt();
     save();
     return state.count;
   }
@@ -285,7 +346,7 @@
 
     // Counted before the click, because the click navigates and nothing after
     // it runs. The server's count overrules this on the next page anyway.
-    if (state.count === 0) state.windowStart = Date.now();
+    if (!state.windowEnd) state.windowEnd = nextGrantAt();
     state.count += 1;
     save();
     render();
@@ -604,6 +665,8 @@
     btn.disabled = spent();
     btn.title = spent()
       ? `All ${MAX_WISHES} wishes used this window — the well's own limit.`
+        + ` The next grant is ${gapWords((state.windowEnd || nextGrantAt()) - Date.now())}`
+        + ` away, and wipes the count.`
       : state.running
         ? "Stop wishing. The window's count is kept."
         : resumable()
