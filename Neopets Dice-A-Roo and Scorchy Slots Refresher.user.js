@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Dice-A-Roo and Scorchy Slots Refresher
 // @namespace    local-advisor-fork
-// @version      3.2
+// @version      3.3
 // @description  Plays Dice-A-Roo or Scorchy Slots for the pet-boredom mechanic, in rounds of a few plays as real page loads, and stops itself the moment an answer says the pet is bored. It submits the game's own form, so Dice-A-Roo costs 5 NP a game and its rolls are free, and Scorchy Slots costs 5 NP a spin; SUBMIT_TO_PLAY false stops it acting.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/games/dicearoo.phtml*
@@ -336,6 +336,11 @@
 //     run. A separate halt covers a rate only a bug could produce.
 //   - Halt on anything unfamiliar, as above, now read from every single play's
 //     answer rather than once per page load.
+//   - It only plays while this tab is the one in front of you. A run held
+//     this way sends nothing at all and resumes where it stopped, mid-round
+//     included - see PLAY_ONLY_WHEN_ACTIVE. Plays landing while you read a
+//     different Neopets tab are both pointless to watch and a pattern no
+//     person produces, so that is the one case this closes by default.
 //   - It starts stopped. Running is a click, and it is remembered per game, so
 //     a reload you did not ask for does not resume a run you had finished.
 //     Stop pauses rather than ends: nothing is sent, and the count is kept for
@@ -361,6 +366,24 @@
     // than watching it work. It bursts without reloading and reaches about 30
     // plays a minute against this path's roughly 20.
     BACKGROUND_PLAYS: false,
+
+    // Only play while this tab is the one in front of you. A run is meant to
+    // look like somebody holding F5 on this page; a burst of plays arriving
+    // while you sit reading a different Neopets tab looks like nothing a
+    // person does, and it is the tab you are actually on that the site is
+    // watching you act in. So the run holds instead, and picks up exactly
+    // where it left off - mid-round included - when you come back.
+    //
+    //   "visible"  the selected tab in its window. Another Neopets tab in
+    //              front of this one makes this one hidden, which is the case
+    //              this exists for.
+    //   "focused"  stricter: also holds while another window or another
+    //              application is in front, this browser's own devtools
+    //              included. The setting to use if Neopets lives in a second
+    //              window beside whatever you are doing, since "visible" is
+    //              perfectly happy there.
+    //   false      plays whether you are looking or not, as it used to.
+    PLAY_ONLY_WHEN_ACTIVE: "visible",
 
     // Paint each answer's content column into the page, so a run visibly moves
     // instead of sitting motionless while the plays happen underneath it. See
@@ -1049,6 +1072,9 @@
   // tells render() to show it disabled instead of lying about what a click
   // would do.
   let standDown = false;
+  // Set only while a round that has already started is waiting for the tab to
+  // come back, so the bar can say so instead of saying "playing".
+  let holding = false;
 
   function sleep(ms) {
     return new Promise((done) => setTimeout(done, ms));
@@ -1160,6 +1186,11 @@
       const want = burstSize();
       for (let i = 0; i < want; i += 1) {
         if (!state.running) return;
+        // Switched away mid-round. The round is held rather than abandoned,
+        // and resumes from the same play, so a round is never half a round -
+        // and nothing is sent while you are looking at another tab.
+        await untilActive();
+        if (!state.running) return;
 
         let said;
         try {
@@ -1262,7 +1293,60 @@
   //
   // Navigation uses location.replace so a long run leaves one history entry
   // rather than a hundred and fifty in front of the Back button.
+  // Is this tab in front of you? See PLAY_ONLY_WHEN_ACTIVE.
+  //
+  // visibilityState rather than document.hidden, because the three-state
+  // answer is the one the setting is written against, and hasFocus() is
+  // asked only when the strict setting wants it - it is false for a tab that
+  // is perfectly visible beside the window you are typing in.
+  function tabIsActive() {
+    const want = CONFIG.PLAY_ONLY_WHEN_ACTIVE;
+    if (!want) return true;
+    if (document.visibilityState === "hidden") return false;
+    if (want === "focused" && typeof document.hasFocus === "function") {
+      return document.hasFocus();
+    }
+    return true;
+  }
+
+  // Resolves when the tab is active again - or when the run is stopped, so a
+  // Stop clicked while a round is held does not leave this waiting forever
+  // with `busy` stuck true and every later round refusing to start.
+  //
+  // The interval is what notices that second case: stopping fires no event.
+  function untilActive() {
+    if (tabIsActive() || !state.running) return Promise.resolve();
+    console.info(`${TAG} ${game}: holding the round - this tab is in the background`);
+    // `busy` is still true through a held round - the round has started and
+    // has not finished - and the bar reads that as "playing", which is the one
+    // thing it is not. This is what it reads instead.
+    holding = true;
+    render();
+    return new Promise((done) => {
+      const check = () => {
+        if (!tabIsActive() && state.running) return;
+        document.removeEventListener("visibilitychange", check);
+        window.removeEventListener("focus", check);
+        clearInterval(poll);
+        holding = false;
+        if (state.running) console.info(`${TAG} ${game}: back in front; carrying on`);
+        done();
+      };
+      const poll = setInterval(check, 1000);
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("focus", check);
+    });
+  }
+
   function go() {
+    // Not while the tab is in the background. The due time is deliberately
+    // left where it is rather than pushed forward: the wait has been served,
+    // so the first go() after you come back fires at once instead of starting
+    // the whole delay again.
+    if (!tabIsActive()) {
+      render();
+      return;
+    }
     state.nextAt = 0;
 
     // A new round starts here. Mid-round this is already set, by this load or
@@ -1435,12 +1519,28 @@
   function startClock() {
     if (!frame) frame = requestAnimationFrame(paintClock);
   }
-  // Hidden tabs do not fire rAF, so the loop dies when you switch away and has
-  // to be restarted when you come back; without this the countdown stays
-  // frozen on whatever it last showed.
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) startClock();
-  });
+  // Coming back to the tab does two things, and neither happens by itself.
+  //
+  // Hidden tabs do not fire rAF, so the clock loop dies when you switch away
+  // and has to be restarted; without this the countdown stays frozen on
+  // whatever it last showed.
+  //
+  // And a run held by PLAY_ONLY_WHEN_ACTIVE is due the moment you return,
+  // while the tick that would notice is throttled to about once a minute in a
+  // background tab - so without this a run would sit there for up to a minute
+  // after you came back, which reads as broken.
+  const wake = () => {
+    if (!tabIsActive()) {
+      render();
+      return;
+    }
+    startClock();
+    if (state.running && state.nextAt && Date.now() >= state.nextAt) go();
+    else render();
+  };
+  document.addEventListener("visibilitychange", wake);
+  window.addEventListener("focus", wake);
+  window.addEventListener("blur", () => render());
 
   // ----------------------------------------------------------------- the panel
   //
@@ -1758,8 +1858,10 @@
     let label;
     if (!state.running) {
       label = state.note || "stopped";
-    } else if (busy) {
+    } else if (busy && !holding) {
       label = "playing";
+    } else if (!tabIsActive() || holding) {
+      label = "held \u2014 nothing is sent while this tab is in the background";
     } else if (state.nextAt) {
       const secs = fmtSeconds(state.nextAt - Date.now());
       label = secs === "\u2014" ? "about to play" : `next round in ${secs}`;
