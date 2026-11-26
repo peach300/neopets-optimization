@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.0
+// @version      2.1
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -209,6 +209,11 @@
   //       way as path. The Fruit Machine has two.
   //   textOnly: only the page's own words mark this row. Nothing you click on
   //       it counts, because one go is not the whole thing - see Dice-A-Roo.
+  //   resetsIn / resetsAt / spanWords / everyWords: an allowance that does not
+  //       run on the NST day. Only the Wishing Well does not: its seven wishes
+  //       run to the next grant rather than to midnight, so it brings its own
+  //       clock and the words to describe it. Everything else defaults to
+  //       midnight NST and "a day".
 
   // The line that ends a day of Dice-A-Roo or Scorchy Slots. Taken from the
   // refresher's BORED_PATTERNS in this same folder, which is led by a line
@@ -693,6 +698,39 @@
       spent: /let[+\s]somebody[+\s]else[+\s]play/i,
     },
 
+    // Seven wishes rather than twenty, and the only allowance here that is not
+    // a day: see msUntilWellGrant for the two grant times it runs to instead.
+    // Like the Battledome it is read rather than counted - the well prints
+    // "Wish Count: N", which is the server's own figure and moves for a wish
+    // made in another tab or refused by the form, neither of which a count of
+    // clicks here would see.
+    {
+      id: "wishingwell",
+      name: "Wishing Well",
+      path: "/wishing.phtml",
+      paths: ["/process_wishing.phtml"],
+      type: "allowance",
+      uses: 7,
+      on: true,
+      note: "7 wishes a twelve-hour window, 21 NP each. The well grants and wipes its slate at about 8am and 8pm NST, which is when this row comes back.",
+      resetsIn: msUntilWellGrant,
+      resetsAt: "the next grant, about 8am or 8pm NST",
+      spanWords: "this window",
+      everyWords: "7 a twelve-hour window",
+      counter() {
+        // Read off the whole page rather than the <b> it is printed in, since
+        // nothing promises the tag. The page a wish lands on may not print it
+        // at all, in which case this reads nothing and the next visit to the
+        // well sets the row straight.
+        const m = (document.body?.textContent || "").match(/Wish\s*Count:\s*(\d+)/i);
+        if (!m) return null;
+        const used = Number(m[1]);
+        // Seven is the well's own limit; a figure past it is not this counter.
+        if (used > 7) return null;
+        return { used, total: 7 };
+      },
+    },
+
     {
       id: "snowager",
       name: "Snowager",
@@ -719,16 +757,16 @@
   // later update - keep their registry place at the end rather than jumping
   // to the top, and a dragged order in the settings beats this entirely.
   const DEFAULT_ORDER = [
-    "bank", "questlog", "dome", "trudy", "grundo", "fishing", "anchor", "applebobbing",
-    "shrine", "council", "desertedtomb", "shopofoffers", "caverns",
-    "lostinthedark", "forgottenshore", "fruitmachine", "jelly", "omelette",
-    "gravedanger", "tombola", "springs", "neggcave", "wiseking", "grumpyking",
-    "lottery", "marrow", "dicearoo", "slots", "kikopop", "expellibox", "strength", "buriedtreasure",
-    "cocoshy", "bagatelle", "lab", "petpetlab", "excitement", "knowledge",
+    "bank", "questlog", "dome", "trudy", "grundo", "fishing", "anchor",
+    "applebobbing", "shrine", "council", "desertedtomb", "shopofoffers",
+    "caverns", "lostinthedark", "forgottenshore", "fruitmachine", "jelly",
+    "omelette", "gravedanger", "tombola", "springs", "neggcave", "wiseking",
+    "grumpyking", "lottery", "marrow", "dicearoo", "slots", "kikopop",
+    "expellibox", "strength", "buriedtreasure", "cocoshy", "bagatelle",
+    "wishingwell", "lab", "petpetlab", "excitement", "knowledge",
     "mediocrity", "misfortune", "monotony", "extravagance", "starlight",
     "hauntedkiosk", "icekiosk",
   ];
-
   // Jellyneo picks an item image for every daily on its list, and they are all
   // served from images.neopets.com — the same host the page is already loading
   // art from — so the panel borrows them rather than inventing its own icon
@@ -740,6 +778,7 @@
   // its scarab is filled in here by name.
   const IMG_HOST = "https://images.neopets.com";
   const ICONS = {
+    wishingwell: "items/stamp_neo_well.gif",
     dome: "items/bd_spirit_blade.gif",
     dicearoo: "items/fur_dice_gold.gif",
     slots: "games/clicktoplay/icon_8.gif",
@@ -917,7 +956,7 @@
       if (fresh && fresh.spent) return;
       const count = Math.min(t.uses, (fresh?.count || 0) + 1);
       states[id] = {
-        endTime: fresh ? fresh.endTime : Date.now() + msUntilNstMidnight(),
+        endTime: fresh ? fresh.endTime : Date.now() + allowanceResetIn(t),
         count,
         src,
       };
@@ -970,7 +1009,7 @@
     // every few seconds; without this the store and the log would churn.
     if (fresh && fresh.src === "page" && fresh.count === used && fresh.total === total) return;
     states[id] = {
-      endTime: fresh ? fresh.endTime : Date.now() + msUntilNstMidnight(),
+      endTime: fresh ? fresh.endTime : Date.now() + allowanceResetIn(t),
       count: used,
       total,
       spent: used >= total,
@@ -990,7 +1029,7 @@
     if (!t || t.type !== "allowance") return;
     const states = readStates();
     states[id] = {
-      endTime: Date.now() + msUntilNstMidnight(),
+      endTime: Date.now() + allowanceResetIn(t),
       count: t.uses,
       spent: true,
       src: "text",
@@ -1076,6 +1115,45 @@
 
   function msUntilNstMidnight() {
     return (86400 - nstSecondsIntoDay()) * 1000;
+  }
+
+  // The Wishing Well's two grant times. Jellyneo: wishes are granted twice a
+  // day, twelve hours apart, at around 8:00 AM and 8:00 PM NST — the well's
+  // own page claiming four times a day is wrong — and as they are granted
+  // every ungranted wish from the previous twelve hours is wiped and the well
+  // starts clean. So the seven run to the next of those hours: not to midnight
+  // like every other allowance here, and not to twelve hours after your first
+  // wish either.
+  //
+  // The slack is for the drift. That 8:00 was read in February 2026 and moves
+  // a few seconds later every day, which by now is a quarter of an hour or so
+  // that nobody is publishing, so the row comes back a little late rather than
+  // promising wishes that have not been granted yet. The Wishing Well script
+  // in this same folder holds its own count three times as long, because there
+  // being early spends 22 NP on a refusal; here it only draws a row.
+  const WELL_GRANT_HOURS = [8, 20];
+  const WELL_GRANT_SLACK = 15 * 60_000;
+
+  function msUntilWellGrant() {
+    const secs = nstSecondsIntoDay();
+    const marks = WELL_GRANT_HOURS.map((h) => h * 3600 + WELL_GRANT_SLACK / 1000);
+    for (const mark of marks) if (secs < mark) return (mark - secs) * 1000;
+    return (86400 - secs + marks[0]) * 1000;
+  }
+
+  // An allowance's own day, and the words for it: four defaults in one place,
+  // so every row that does run on the NST day says nothing about any of this.
+  function allowanceResetIn(t) {
+    return t.resetsIn ? t.resetsIn() : msUntilNstMidnight();
+  }
+  function allowanceResetAt(t) {
+    return t.resetsAt || "midnight NST";
+  }
+  function allowanceSpan(t) {
+    return t.spanWords || "today";
+  }
+  function allowanceEvery(t) {
+    return t.everyWords || `${t.uses} a day`;
   }
 
   // A window that repeats every hour, given the minute it starts on. It is
@@ -1219,14 +1297,16 @@
             ready: true,
             ms: 0,
             text: `${live.count}/${live.total}`,
-            label: `${live.count} of today's ${live.total} taken \u2014 read from the page`,
+            label: `${live.count} of ${allowanceSpan(t)}'s ${live.total} taken`
+              + " \u2014 read from the page",
             kind: "allowance",
           };
         }
         return {
           ready: false,
           ms: live.endTime - Date.now(),
-          label: `today's ${live.total} are gone \u2014 resets at midnight NST`,
+          label: `${allowanceSpan(t)}'s ${live.total} are gone`
+            + ` \u2014 resets at ${allowanceResetAt(t)}`,
           kind: "allowance",
         };
       }
@@ -1234,7 +1314,8 @@
         return {
           ready: false,
           ms: live.endTime - Date.now(),
-          label: `the game says you are out of tries \u2014 resets at midnight NST`,
+          label: "the game says you are out of tries"
+            + ` \u2014 resets at ${allowanceResetAt(t)}`,
           kind: "allowance",
         };
       }
@@ -1242,7 +1323,7 @@
       return {
         ready: true,
         ms: 0,
-        label: `${t.uses} a day`
+        label: allowanceEvery(t)
           + (used ? ` \u2014 ${used} counted so far, roughly` : "")
           + " \u2014 the row stands down when the game says you are out",
         kind: "allowance",
@@ -2354,7 +2435,7 @@
   function markTitle(t, st) {
     if (t.type === "allowance") {
       return st.ready
-        ? `Out of tries \u2014 stand this down until midnight NST`
+        ? `Out of tries \u2014 stand this down until ${allowanceResetAt(t)}`
         : "Not out after all \u2014 put it back to ready";
     }
     return st.ready
@@ -2585,7 +2666,7 @@
   }
 
   function cadenceText(t) {
-    if (t.type === "allowance") return `${t.uses} times a day`;
+    if (t.type === "allowance") return t.everyWords || `${t.uses} times a day`;
     if (t.randomStart) return "once a day, random start hour";
     if (t.type === "daily") return "resets at midnight NST";
     if (t.type === "window") {
