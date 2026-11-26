@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.8
+// @version      2.9
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -728,6 +728,10 @@
     // `mins` is only the fallback for a hand-tick, and an hour is the shortest
     // course the cheapest school sells; the next visit replaces the guess with
     // the page's own figure.
+    //
+    // All three start switched off. There are three schools and a pet trains
+    // at one of them - whichever its level allows - so turning them all on put
+    // two rows in the panel that nobody was ever going to act on.
     {
       id: "training",
       name: "Training School",
@@ -737,7 +741,6 @@
       mins: 1 * HOUR,
       cadenceWords: "as long as the course takes",
       pageOnly: true,
-      on: true,
       note: "Mystery Island, paid in codestones. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
       countdown: trainingCountdown,
     },
@@ -750,7 +753,6 @@
       mins: 1 * HOUR,
       cadenceWords: "as long as the course takes",
       pageOnly: true,
-      on: true,
       note: "The school for pets past level 250, paid in codestones. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
       countdown: trainingCountdown,
     },
@@ -763,7 +765,6 @@
       mins: 1 * HOUR,
       cadenceWords: "as long as the course takes",
       pageOnly: true,
-      on: true,
       note: "Cap'n Threelegs', paid in dubloons. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
       countdown: trainingCountdown,
     },
@@ -1062,8 +1063,8 @@
     bank: "items/ltoo_scorch_bank.gif",
     questlog: "items/toy_hannah_action.gif",
     faeriequest: "items/mall_fortcookie_4.gif",
-    training: "items/codestone12.gif",
-    ninjatraining: "items/codestone3.gif",
+    training: "items/codestone3.gif",
+    ninjatraining: "items/codestone12.gif",
     academy: "items/dubloon2.gif",
     lab: "items/labmap_09.gif",
     petpetlab: "items/petpetlab_soot.gif",
