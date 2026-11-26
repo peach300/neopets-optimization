@@ -1118,8 +1118,8 @@
     // A plain window row has nothing to record; one with a cooldown does.
     if (t.type === "window" && !t.cooldownMins) return;
     const states = readStates();
-    const prev = states[id];
-    if (t.type !== "allowance" && prev && prev.endTime > Date.now()) {
+    const prev = liveTimer(id);
+    if (t.type !== "allowance" && prev) {
       const better = (SOURCE_RANK[src] || 0) >= (SOURCE_RANK[prev.src] || 0);
       if (!better) return;
     }
@@ -1127,13 +1127,12 @@
     // the day's tries, and the stored endTime is only there to throw the
     // tally away at midnight NST.
     if (t.type === "allowance") {
-      const fresh = prev && prev.endTime > Date.now() ? prev : null;
       // The game has already said you are out. Nothing counted after that
       // means anything, and overwriting it would put the row back to ready.
-      if (fresh && fresh.spent) return;
-      const count = Math.min(t.uses, (fresh?.count || 0) + 1);
+      if (prev && prev.spent) return;
+      const count = Math.min(t.uses, (prev?.count || 0) + 1);
       states[id] = {
-        endTime: fresh ? fresh.endTime : Date.now() + allowanceResetIn(t),
+        endTime: prev ? prev.endTime : Date.now() + allowanceResetIn(t),
         count,
         src,
       };
@@ -1183,8 +1182,7 @@
     const t = BY_ID.get(id);
     if (!t || t.type !== "allowance") return;
     const states = readStates();
-    const prev = states[id];
-    const fresh = prev && prev.endTime > Date.now() ? prev : null;
+    const fresh = liveTimer(id);
     // The page says the same thing on every read, and this one is re-read
     // every few seconds; without this the store and the log would churn.
     if (fresh && fresh.src === "page" && fresh.count === used && fresh.total === total) return;
@@ -1441,167 +1439,192 @@
     settled: "the page says it is finished",
   };
 
+  // The stored timer for a row, or null when there is none or it has already
+  // run out. Every reader of the store wants exactly this - an expired entry
+  // is not information, it is yesterday - and the test was written out six
+  // times with six different variable names for it.
+  function liveTimer(id) {
+    const held = readStates()[id];
+    return held && held.endTime > Date.now() ? held : null;
+  }
+
+  // What a row says right now: ready or not, how long is left, and the words
+  // for why. One function per kind of row, because they have nothing in common
+  // beyond the shape they return - a daily reads the store and the clock, an
+  // allowance reads a tally, a window is arithmetic - and reading one of them
+  // used to mean scrolling past the other three.
   function rowState(t) {
-    if (t.type === "daily") {
-      const done = readStates()[t.id];
-      if (done && done.endTime > Date.now()) {
-        if (done.kind === "retry") {
-          return {
-            ready: false,
-            ms: done.endTime - Date.now(),
-            label: t.breakWords
-              ? `${t.breakWords} \u2014 back at the top of the hour`
-              : "hasn't started yet \u2014 it begins on the hour",
-            kind: "daily",
-          };
-        }
+    if (t.type === "daily") return dailyRowState(t);
+    if (t.type === "allowance") return allowanceRowState(t);
+    if (t.type === "window") return t.hourly ? hourlyRowState(t) : windowRowState(t);
+    return intervalRowState(t);
+  }
+
+  function dailyRowState(t) {
+    const done = liveTimer(t.id);
+    if (done) {
+      if (done.kind === "retry") {
         return {
           ready: false,
           ms: done.endTime - Date.now(),
-          label: (done.why || `done today (${SOURCE_LABEL[done.src] || "marked"})`)
-            + " \u2014 resets at midnight NST",
+          label: t.breakWords
+            ? `${t.breakWords} \u2014 back at the top of the hour`
+            : "hasn't started yet \u2014 it begins on the hour",
           kind: "daily",
         };
       }
-      // Not marked today - but the activity itself may be shut, which is not
-      // the same thing as waiting for you, and is worth knowing without going
-      // to look. This needs no visit and no stored state: it is the clock.
-      const shut = msUntilBreakEnds(t);
-      if (shut) {
-        return {
-          ready: false,
-          ms: shut,
-          label: `${t.breakWords} \u2014 back at the top of the hour`,
-          kind: "daily",
-        };
-      }
-      // A daily you did on another device reads as ready until you tick it
-      // off, which is the honest answer: the site does not say.
       return {
-        ready: true,
-        ms: 0,
-        label: t.randomStart
-          ? "worth a look \u2014 it may not have started, or may be over"
-          : "not done yet today",
+        ready: false,
+        ms: done.endTime - Date.now(),
+        label: (done.why || `done today (${SOURCE_LABEL[done.src] || "marked"})`)
+          + " \u2014 resets at midnight NST",
         kind: "daily",
       };
     }
-    if (t.type === "allowance") {
-      const stored = readStates()[t.id];
-      const live = stored && stored.endTime > Date.now() ? stored : null;
-      // Only the game's own refusal ends the day. The row used to print the
-      // running tally - "6/20" - which read like something the site had told
-      // us and was not: it counted openings of the handler page, so a reload,
-      // a play in another tab or a click that never landed all moved it. A
-      // number that is wrong in both directions is worse than no number, so
-      // the row just says Ready until the answer says you are out.
-      // A figure the site printed, which is the one allowance tally worth
-      // putting on the row: it is the site's own count, not this script's
-      // guess at one, so it goes in the clock's place as "3/20".
-      if (live && live.src === "page" && live.total) {
-        if (live.count < live.total) {
-          return {
-            ready: true,
-            ms: 0,
-            // undefined rather than the figure for a row that does not want
-            // it on the clock; timeText falls through to "Ready".
-            text: t.hideCount ? undefined : `${live.count}/${live.total}`,
-            label: `${live.count} of ${allowanceSpan(t)}'s ${live.total} taken`
-              + " \u2014 read from the page",
-            kind: "allowance",
-          };
-        }
-        return {
-          ready: false,
-          ms: live.endTime - Date.now(),
-          label: `${allowanceSpan(t)}'s ${live.total} are gone`
-            + ` \u2014 resets at ${allowanceResetAt(t)}`,
-          kind: "allowance",
-        };
-      }
-      if (live && live.spent) {
-        return {
-          ready: false,
-          ms: live.endTime - Date.now(),
-          label: "the game says you are out of tries"
-            + ` \u2014 resets at ${allowanceResetAt(t)}`,
-          kind: "allowance",
-        };
-      }
-      const used = live?.count || 0;
+    // Not marked today - but the activity itself may be shut, which is not
+    // the same thing as waiting for you, and is worth knowing without going
+    // to look. This needs no visit and no stored state: it is the clock.
+    const shut = msUntilBreakEnds(t);
+    if (shut) {
       return {
-        ready: true,
-        ms: 0,
-        label: allowanceEvery(t)
-          + (used ? ` \u2014 ${used} counted so far, roughly` : "")
-          + " \u2014 the row stands down when the game says you are out",
+        ready: false,
+        ms: shut,
+        label: `${t.breakWords} \u2014 back at the top of the hour`,
+        kind: "daily",
+      };
+    }
+    // A daily you did on another device reads as ready until you tick it
+    // off, which is the honest answer: the site does not say.
+    return {
+      ready: true,
+      ms: 0,
+      label: t.randomStart
+        ? "worth a look \u2014 it may not have started, or may be over"
+        : "not done yet today",
+      kind: "daily",
+    };
+  }
+
+  function allowanceRowState(t) {
+    const live = liveTimer(t.id);
+    // Only the game's own refusal ends the day. The row used to print the
+    // running tally - "6/20" - which read like something the site had told
+    // us and was not: it counted openings of the handler page, so a reload,
+    // a play in another tab or a click that never landed all moved it. A
+    // number that is wrong in both directions is worse than no number, so
+    // the row just says Ready until the answer says you are out.
+    // A figure the site printed, which is the one allowance tally worth
+    // putting on the row: it is the site's own count, not this script's
+    // guess at one, so it goes in the clock's place as "3/20".
+    if (live && live.src === "page" && live.total) {
+      if (live.count < live.total) {
+        return {
+          ready: true,
+          ms: 0,
+          // undefined rather than the figure for a row that does not want
+          // it on the clock; timeText falls through to "Ready".
+          text: t.hideCount ? undefined : `${live.count}/${live.total}`,
+          label: `${live.count} of ${allowanceSpan(t)}'s ${live.total} taken`
+            + " \u2014 read from the page",
+          kind: "allowance",
+        };
+      }
+      return {
+        ready: false,
+        ms: live.endTime - Date.now(),
+        label: `${allowanceSpan(t)}'s ${live.total} are gone`
+          + ` \u2014 resets at ${allowanceResetAt(t)}`,
         kind: "allowance",
       };
     }
-    if (t.type === "window" && t.hourly) {
-      const cooling = readStates()[t.id];
-      if (cooling && cooling.endTime > Date.now()) {
-        return {
+    if (live && live.spent) {
+      return {
+        ready: false,
+        ms: live.endTime - Date.now(),
+        label: "the game says you are out of tries"
+          + ` \u2014 resets at ${allowanceResetAt(t)}`,
+        kind: "allowance",
+      };
+    }
+    const used = live?.count || 0;
+    return {
+      ready: true,
+      ms: 0,
+      label: allowanceEvery(t)
+        + (used ? ` \u2014 ${used} counted so far, roughly` : "")
+        + " \u2014 the row stands down when the game says you are out",
+      kind: "allowance",
+    };
+  }
+
+  // The Symol Hole: a window whose four minutes are not knowable from here, so
+  // the row has a state for "you have not told me yet" as well as open, shut
+  // and cooling down.
+  function hourlyRowState(t) {
+    const cooling = liveTimer(t.id);
+    if (cooling) {
+      return {
+        ready: false,
+        ms: cooling.endTime - Date.now(),
+        label: "you have had your hour's try \u2014 the cooldown is exactly an hour",
+        kind: "window",
+      };
+    }
+    const minute = todaysWindow(t);
+    if (minute === "none") {
+      return {
+        ready: false,
+        ms: msUntilNstMidnight(),
+        text: "none",
+        label: "no prize window at all today \u2014 nothing to catch",
+        kind: "window",
+      };
+    }
+    if (minute === null) {
+      return {
+        ready: false,
+        // Not ready, but waiting on you rather than on a clock - which is
+        // why it is listed even when the panel is set to show only what is
+        // ready. See the filter in render().
+        needsYou: true,
+        ms: 0,
+        text: "set",
+        label:
+          "today's 4-minute window is not set \u2014 it changes daily, and " +
+          "Jellyneo publishes it; put the minute in the settings",
+        kind: "window",
+      };
+    }
+    const w = hourlyWindowStatus(minute, t.hourly);
+    return w.open
+      ? {
+          ready: true,
+          ms: w.ms,
+          label: `window open for ${formatShort(w.ms)} (:${String(minute).padStart(2, "0")} each hour)`,
+          kind: "window",
+        }
+      : {
           ready: false,
-          ms: cooling.endTime - Date.now(),
-          label: "you have had your hour's try \u2014 the cooldown is exactly an hour",
+          ms: w.ms,
+          label: `until the :${String(minute).padStart(2, "0")} window`,
           kind: "window",
         };
-      }
-      const minute = todaysWindow(t);
-      if (minute === "none") {
-        return {
-          ready: false,
-          ms: msUntilNstMidnight(),
-          text: "none",
-          label: "no prize window at all today \u2014 nothing to catch",
-          kind: "window",
-        };
-      }
-      if (minute === null) {
-        return {
-          ready: false,
-          // Not ready, but waiting on you rather than on a clock - which is
-          // why it is listed even when the panel is set to show only what is
-          // ready. See the filter in render().
-          needsYou: true,
-          ms: 0,
-          text: "set",
-          label:
-            "today's 4-minute window is not set \u2014 it changes daily, and " +
-            "Jellyneo publishes it; put the minute in the settings",
-          kind: "window",
-        };
-      }
-      const w = hourlyWindowStatus(minute, t.hourly);
-      return w.open
-        ? {
-            ready: true,
-            ms: w.ms,
-            label: `window open for ${formatShort(w.ms)} (:${String(minute).padStart(2, "0")} each hour)`,
-            kind: "window",
-          }
-        : {
-            ready: false,
-            ms: w.ms,
-            label: `until the :${String(minute).padStart(2, "0")} window`,
-            kind: "window",
-          };
-    }
-    if (t.type === "window") {
-      const w = windowStatus(t.windows);
-      return w.open
-        ? { ready: true, ms: w.ms, label: `open for ${formatShort(w.ms)}`, kind: "window" }
-        : { ready: false, ms: w.ms, label: "until it opens", kind: "window" };
-    }
-    const stored = readStates()[t.id];
-    if (!stored || stored.endTime <= Date.now()) {
-      return { ready: true, ms: 0, label: "ready", kind: "interval" };
-    }
+  }
+
+  function windowRowState(t) {
+    const w = windowStatus(t.windows);
+    return w.open
+      ? { ready: true, ms: w.ms, label: `open for ${formatShort(w.ms)}`, kind: "window" }
+      : { ready: false, ms: w.ms, label: "until it opens", kind: "window" };
+  }
+
+  function intervalRowState(t) {
+    const held = liveTimer(t.id);
+    if (!held) return { ready: true, ms: 0, label: "ready", kind: "interval" };
     return {
       ready: false,
-      ms: stored.endTime - Date.now(),
-      label: SOURCE_LABEL[stored.src] || "marked done",
+      ms: held.endTime - Date.now(),
+      label: SOURCE_LABEL[held.src] || "marked done",
       kind: "interval",
     };
   }
@@ -1875,147 +1898,178 @@
     return seen;
   }
 
+  // Jumping in outside the prize window does not start a cooldown, and the
+  // page says the same thing either way \u2014 so neither does this. Asked at
+  // the moment of the attempt, not at page load: the window may be set (or
+  // may open) while the page sits there.
+  function insideWindow(t) {
+    if (!t.hourly) return true;
+    const minute = todaysWindow(t);
+    if (minute === null || minute === "none") return false;
+    return hourlyWindowStatus(minute, t.hourly).open;
+  }
+
+  function markInWindow(t, src) {
+    if (insideWindow(t)) markDone(t.id, src);
+  }
+
+  // How a visit is detected, in order of how good the evidence is.
+  //
+  // The readers come first and each answers one question: can I settle this
+  // row from what is on the page? The first one that can stops the chain,
+  // because everything after it is weaker evidence about the same thing - and
+  // because arming a click watcher on a page that has already told us the
+  // answer is how a row gets marked by the wrong thing.
+  //
+  // Only when none of them can does the row fall back to watching what you
+  // do: the page's own requests, a form, a click. Those three share a piece
+  // of mutable state (when the control was last clicked) and so stay together
+  // in watchForAction.
   function watchForVisit(t) {
     if (t.type === "window" && !t.cooldownMins) return;
+    if (readCountdown(t)) return;
+    if (readCounter(t)) return;
+    if (readSettled(t)) return;
+    if (readBypassPage(t)) return;
+    if (readPageText(t)) return;
+    watchForAction(t);
+  }
 
-    // 0. The page states how long is left. Only Grave Danger does, and it is
-    //    better evidence than anything below, which all work backwards from
-    //    something you did; this works forwards from what the site says is
-    //    still to come. It is also the only source that fires on a visit
-    //    where you did nothing at all - an adventure already running when you
-    //    arrive is news whether or not this browser started it.
-    if (t.countdown) {
-      const left = t.countdown();
-      if (left !== null) {
-        if (left > 0) {
-          markUntil(t.id, Date.now() + left, "page");
-          // Nothing you can do while it is out there counts as a go, so the
-          // request and click watchers below are never armed.
-          return;
-        }
-        // It is back. A timer still held here over-ran (four hours was the
-        // guess, and the adventure was longer), or the adventure ended some
-        // other way; either way the row should say ready.
+  // 0. The page states how long is left. Only Grave Danger does, and it is
+  //    better evidence than anything below, which all work backwards from
+  //    something you did; this works forwards from what the site says is
+  //    still to come. It is also the only source that fires on a visit
+  //    where you did nothing at all - an adventure already running when you
+  //    arrive is news whether or not this browser started it.
+  function readCountdown(t) {
+    if (!t.countdown) return false;
+    const left = t.countdown();
+    // The page has no countdown on it this time, which is not the same as a
+    // countdown of zero: it says nothing, so the sources below get their turn.
+    if (left === null) return false;
+    if (left > 0) {
+      markUntil(t.id, Date.now() + left, "page");
+      // Nothing you can do while it is out there counts as a go, so the
+      // request and click watchers are never armed.
+      return true;
+    }
+    // It is back. A timer still held here over-ran (four hours was the
+    // guess, and the adventure was longer), or the adventure ended some
+    // other way; either way the row should say ready.
+    clearDone(t.id);
+    return false;
+  }
+
+  // 0b. The page states how many of the day's allowance are gone. The
+  //     Battledome is the only one that does, and like the countdown above
+  //     it is the site's own figure rather than a tally kept here.
+  function readCounter(t) {
+    if (!t.counter) return false;
+    const read = () => {
+      const got = t.counter();
+      if (got) markCounted(t.id, got.used, got.total);
+    };
+    read();
+    // Re-read, rather than read once: the counter is printed when a fight
+    // ends, which can be a long while after the page loaded, and the page
+    // never reloads around it. Five seconds costs one failed lookup and
+    // keeps the row right by the time you glance at the panel.
+    setInterval(read, 5000);
+    // Nothing below is armed. A click in the arena is not a drop, and the
+    // page is about to say what the real number is anyway.
+    return true;
+
+  }
+  // 0c. The page says whether the day is finished, rather than leaving it
+  //     to be inferred from something you did. Only the Quest Log does, and
+  //     it is the only row where "you clicked a thing" is actively wrong:
+  //     one claim out of six is not the day.
+  //
+  //     It answers both ways, which the sources below cannot. A row the
+  //     page says is unfinished has its stored timer cleared, so ticking it
+  //     off by hand and then opening the hub with a quest still unclaimed
+  //     puts the row back - the page outranks your memory, as it does
+  //     everywhere else (see SOURCE_RANK).
+  function readSettled(t) {
+    if (!t.settled) return false;
+    const read = () => {
+      const got = t.settled();
+      const held = liveTimer(t.id);
+      if (got === true || typeof got === "string") {
+        // A string is a yes that brought its own words for the row.
+        const why = typeof got === "string" ? got : "";
+        // The page says the same thing on every read, and this is re-read
+        // every few seconds; without this the store and the console would
+        // churn for as long as the page is open.
+        if (held && held.src === "settled" && (held.why || "") === why) return;
+        markDone(t.id, "settled", why);
+      } else if (got === false && held) {
+        // Likewise: only when there is actually something to clear.
         clearDone(t.id);
       }
-    }
-
-    // 0b. The page states how many of the day's allowance are gone. The
-    //     Battledome is the only one that does, and like the countdown above
-    //     it is the site's own figure rather than a tally kept here.
-    if (t.counter) {
-      const read = () => {
-        const got = t.counter();
-        if (got) markCounted(t.id, got.used, got.total);
-      };
-      read();
-      // Re-read, rather than read once: the counter is printed when a fight
-      // ends, which can be a long while after the page loaded, and the page
-      // never reloads around it. Five seconds costs one failed lookup and
-      // keeps the row right by the time you glance at the panel.
-      setInterval(read, 5000);
-      // Nothing below is armed. A click in the arena is not a drop, and the
-      // page is about to say what the real number is anyway.
-      return;
-    }
-
-    // 0c. The page says whether the day is finished, rather than leaving it
-    //     to be inferred from something you did. Only the Quest Log does, and
-    //     it is the only row where "you clicked a thing" is actively wrong:
-    //     one claim out of six is not the day.
-    //
-    //     It answers both ways, which the sources below cannot. A row the
-    //     page says is unfinished has its stored timer cleared, so ticking it
-    //     off by hand and then opening the hub with a quest still unclaimed
-    //     puts the row back - the page outranks your memory, as it does
-    //     everywhere else (see SOURCE_RANK).
-    if (t.settled) {
-      const read = () => {
-        const got = t.settled();
-        const held = readStates()[t.id];
-        const live = held && held.endTime > Date.now();
-        if (got === true || typeof got === "string") {
-          // A string is a yes that brought its own words for the row.
-          const why = typeof got === "string" ? got : "";
-          // The page says the same thing on every read, and this is re-read
-          // every few seconds; without this the store and the console would
-          // churn for as long as the page is open.
-          if (live && held.src === "settled" && (held.why || "") === why) return;
-          markDone(t.id, "settled", why);
-        } else if (got === false && live) {
-          // Likewise: only when there is actually something to clear.
-          clearDone(t.id);
-        }
-      };
-      read();
-      // Re-read, like the counter above: claiming happens over AJAX and the
-      // hub never reloads around it, so the one reading taken at load time
-      // would be the state before you claimed anything.
-      setInterval(read, 5000);
-      // Nothing below is armed - a click in the hub is not the day.
-      return;
-    }
-
-    // Jumping in outside the prize window does not start a cooldown, and the
-    // page says the same thing either way — so neither does this. Asked at
-    // the moment of the attempt, not at page load: the window may be set (or
-    // may open) while the page sits there.
-    const insideWindow = () => {
-      if (!t.hourly) return true;
-      const minute = todaysWindow(t);
-      if (minute === null || minute === "none") return false;
-      return hourlyWindowStatus(minute, t.hourly).open;
     };
-    const mark = (src) => {
-      if (insideWindow()) markDone(t.id, src);
-    };
+    read();
+    // Re-read, like the counter above: claiming happens over AJAX and the
+    // hub never reloads around it, so the one reading taken at load time
+    // would be the state before you claimed anything.
+    setInterval(read, 5000);
+    // Nothing below is armed - a click in the hub is not the day.
+    return true;
+
+  }
+  // Arriving on the handler page means it has already run — the payout is
+  // in the response you are looking at — so this is the action, not a
+  // guess at one, however you got here.
+  function readBypassPage(t) {
+    if (!t.bypassPath) return false;
+    if (!location.pathname.toLowerCase().startsWith(t.bypassPath)) return false;
+    // The handler answers in its own words, and this page is that answer -
+    // so for an allowance it is read rather than counted. "No more throws"
+    // is the day over; a success=0 beside any other wording is a play that
+    // did not happen and is not counted either.
+    const said = document.body?.innerText || "";
+    if (t.spent && t.spent.test(said)) {
+      markSpent(t.id);
+    } else if (!/success=0/i.test(said)) {
+      markDone(t.id, "bypass");
+    }
+    return true;
+
+  }
+  // 1. The page says so. Only Healing Springs does today, but this is the
+  //    only source that is actually evidence rather than inference.
+  function readPageText(t) {
+    if (!t.used && !t.refused && !t.notyet) return false;
+    const verdict = classifyByText(t);
+    if (verdict === "notyet") {
+      // The page has told us the thing is not open. Nothing you do on it
+      // this page-load is a go, so the request and click watchers below are
+      // skipped entirely rather than left to misread a click.
+      markRetry(t.id, "text");
+      return true;
+    }
+    if (verdict === "used") {
+      markInWindow(t, "text");
+    } else if (verdict === "refused") {
+      // A refusal says a cooldown is running but not how much is left, so a
+      // timer already stored is better information than a fresh guess.
+      if (!liveTimer(t.id)) markInWindow(t, "refused");
+    }
+    // The page's word is the only one that counts here: a row you play at
+    // until it tells you to stop is not finished by a click on it.
+    if (t.textOnly) return true;
+    return false;
+  }
+  // Watching what you do, for the rows the page will not simply tell us
+  // about. These three belong together: each of them writes or reads
+  // `controlClickedAt`, which is how a request is tied to the click that
+  // caused it, and splitting them would mean handing that around.
+  function watchForAction(t) {
     const loadedAt = Date.now();
     // For a tracker with a named control, a request only counts as the action
-    // if that control was clicked just before it — otherwise an unrelated
+    // if that control was clicked just before it \u2014 otherwise an unrelated
     // background call on the page would stand in for the deed.
     let controlClickedAt = 0;
-
-    // Arriving on the handler page means it has already run — the payout is
-    // in the response you are looking at — so this is the action, not a
-    // guess at one, however you got here.
-    if (t.bypassPath && location.pathname.toLowerCase().startsWith(t.bypassPath)) {
-      // The handler answers in its own words, and this page is that answer -
-      // so for an allowance it is read rather than counted. "No more throws"
-      // is the day over; a success=0 beside any other wording is a play that
-      // did not happen and is not counted either.
-      const said = document.body?.innerText || "";
-      if (t.spent && t.spent.test(said)) {
-        markSpent(t.id);
-      } else if (!/success=0/i.test(said)) {
-        markDone(t.id, "bypass");
-      }
-      return;
-    }
-
-
-    // 1. The page says so. Only Healing Springs does today, but this is the
-    //    only source that is actually evidence rather than inference.
-    if (t.used || t.refused || t.notyet) {
-      const verdict = classifyByText(t);
-      if (verdict === "notyet") {
-        // The page has told us the thing is not open. Nothing you do on it
-        // this page-load is a go, so the request and click watchers below are
-        // skipped entirely rather than left to misread a click.
-        markRetry(t.id, "text");
-        return;
-      }
-      if (verdict === "used") {
-        mark("text");
-      } else if (verdict === "refused") {
-        const stored = readStates()[t.id];
-        // A refusal says a cooldown is running but not how much is left, so a
-        // timer already stored is better information than a fresh guess.
-        if (!stored || stored.endTime <= Date.now()) mark("refused");
-      }
-      // The page's word is the only one that counts here: a row you play at
-      // until it tells you to stop is not finished by a click on it.
-      if (t.textOnly) return;
-    }
 
     // 2. The site's own request. Most of H5 does its dailies over AJAX —
     //    collecting bank interest POSTs to process_bank.php, the quest and
@@ -2039,7 +2093,7 @@
       const post = (method || "GET").toUpperCase() !== "GET";
       const ajax = /\/np-templates\/ajax\//i.test(u.pathname) || /\.php$/i.test(u.pathname);
       if (!post && !ajax) return;
-      mark("request");
+      markInWindow(t, "request");
     };
 
     const realFetch = pageWindow.fetch;
@@ -2101,7 +2155,7 @@
           if (!controls.some((c) => isActionControl(c, t))) return;
         }
         controlClickedAt = Date.now();
-        mark("request");
+        markInWindow(t, "request");
       },
       { capture: true },
     );
@@ -2120,7 +2174,7 @@
         if (el.tagName === "A" && !isActionLink(el, t)) return;
         if (!isActionControl(el, t)) return;
         controlClickedAt = Date.now();
-        mark("click");
+        markInWindow(t, "click");
       },
       { capture: true },
     );
