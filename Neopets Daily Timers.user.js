@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.2
+// @version      2.3
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -209,6 +209,9 @@
   //       way as path. The Fruit Machine has two.
   //   textOnly: only the page's own words mark this row. Nothing you click on
   //       it counts, because one go is not the whole thing - see Dice-A-Roo.
+  //   breaks / breakWords: hours in the NST day when the activity is shut and
+  //       the row cannot be done at all, as [startHour, endHour), plus the
+  //       words for it. Both kings take three of them.
   //   resetsIn / resetsAt / spanWords / everyWords: an allowance that does not
   //       run on the NST day. Only the Wishing Well does not: its seven wishes
   //       run to the next grant rather than to midnight, so it brings its own
@@ -540,8 +543,44 @@
     { id: "darkcave", name: "Dark Cave", path: "/magma/darkcave.phtml", type: "daily" },
     { id: "quarry", name: "Moltara Quarry", path: "/magma/quarry.phtml", type: "daily" },
     { id: "council", name: "Council Chamber", path: "/altador/council.phtml", type: "daily" },
-    { id: "wiseking", name: "Wise Old King", path: "/medieval/wiseking.phtml", type: "daily" },
-    { id: "grumpyking", name: "Grumpy Old King", path: "/medieval/grumpyking.phtml", type: "daily", note: "Twice a day." },
+    // Both kings leave the throne three times a day and the page shows an
+    // empty one with a sign on it, so Ready was a lie for three hours out of
+    // every twenty-four and a visit in one of them achieved nothing. The hours
+    // are below, and the page's own words are matched as well: between them
+    // the row stands down whether or not you have been to look.
+    //
+    // Hagan's three are agreed on by Jellyneo and SunnyNeo alike. Skarl's
+    // middle one is not: Jellyneo says 12:00-1:00 PM NST (and its quest log
+    // says the Skarl joke quest cannot be done then), SunnyNeo says 1-2PM. The
+    // narrower claim is the one taken, because an hour wrongly called Ready
+    // costs a wasted click that the "back in an hour" line below then catches,
+    // whereas an hour wrongly called shut costs a joke that was there to tell.
+    {
+      id: "wiseking",
+      name: "Wise Old King",
+      path: "/medieval/wiseking.phtml",
+      type: "daily",
+      note: "Once a day. He studies 8\u20139am, 1\u20132pm and 7\u20138pm NST, and the throne is empty through it.",
+      breaks: [[8, 9], [13, 14], [19, 20]],
+      breakWords: "off studying",
+      // SunnyNeo quotes the empty-throne page as "It's time for King Hagan's
+      // daily studying session. He's off reading Brightvale Maps at the
+      // moment. You should try back in an hour or so."
+      notyet: /daily studying session|try back in an hour/i,
+    },
+    {
+      id: "grumpyking",
+      name: "Grumpy Old King",
+      path: "/medieval/grumpyking.phtml",
+      type: "daily",
+      note: "Twice a day. He eats 8\u20139am, 12\u20131pm and 7\u20138pm NST, and the throne is empty through it.",
+      breaks: [[8, 9], [12, 13], [19, 20]],
+      breakWords: "out to lunch",
+      // And Skarl's as "King Skarl has gone to feast on some Chunky Meaty
+      // Stew. You should try back in an hour or so. He might be in a better
+      // mood with a full stomach." The stew is presumably not the only dish.
+      notyet: /gone to feast|better mood with a full stomach|try back in an hour/i,
+    },
     {
       id: "marrow",
       name: "Guess the Marrow's Weight",
@@ -1126,6 +1165,18 @@
     }).format(when);
   }
 
+  // Is this row shut right now, and if so for how long? `breaks` are
+  // [startHour, endHour) in NST, like `windows`, and all of them end on the
+  // hour, which is also where markRetry's clock lands.
+  function msUntilBreakEnds(t) {
+    if (!t.breaks) return 0;
+    const secs = nstSecondsIntoDay();
+    for (const [from, to] of t.breaks) {
+      if (secs >= from * 3600 && secs < to * 3600) return (to * 3600 - secs) * 1000;
+    }
+    return 0;
+  }
+
   function msUntilNstHour() {
     return (3600 - (nstSecondsIntoDay() % 3600)) * 1000;
   }
@@ -1273,7 +1324,9 @@
           return {
             ready: false,
             ms: done.endTime - Date.now(),
-            label: "hasn't started yet \u2014 it begins on the hour",
+            label: t.breakWords
+              ? `${t.breakWords} \u2014 back at the top of the hour`
+              : "hasn't started yet \u2014 it begins on the hour",
             kind: "daily",
           };
         }
@@ -1284,9 +1337,20 @@
           kind: "daily",
         };
       }
-      // Not marked today, so as far as this browser knows it is waiting for
-      // you. A daily you did on another device reads as ready until you tick
-      // it off, which is the honest answer: the site does not say.
+      // Not marked today - but the activity itself may be shut, which is not
+      // the same thing as waiting for you, and is worth knowing without going
+      // to look. This needs no visit and no stored state: it is the clock.
+      const shut = msUntilBreakEnds(t);
+      if (shut) {
+        return {
+          ready: false,
+          ms: shut,
+          label: `${t.breakWords} \u2014 back at the top of the hour`,
+          kind: "daily",
+        };
+      }
+      // A daily you did on another device reads as ready until you tick it
+      // off, which is the honest answer: the site does not say.
       return {
         ready: true,
         ms: 0,
