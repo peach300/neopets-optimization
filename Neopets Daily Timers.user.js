@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.1
+// @version      2.2
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -514,7 +514,24 @@
     },
     { id: "applebobbing", name: "Apple Bobbing", path: "/halloween/applebobbing.phtml", type: "daily" },
     { id: "anchor", name: "Anchor Management", path: "/pirates/anchormanagement.phtml", type: "daily" },
-    { id: "forgottenshore", name: "Forgotten Shore", path: "/pirates/forgottenshore.phtml", type: "daily" },
+    // The shore is the day whether or not it gives you anything, and on a day
+    // it gives you nothing there is nothing on the page to click: a find shows
+    // as an object poking out of the sand and collecting it is a click, which
+    // is what this row used to be detected from, so an empty visit left the
+    // row saying Ready all day. The caption is what settles it instead -
+    // SunnyNeo quotes it as "A deserted shore stretches along in front of you,
+    // but there's nothing of interest to be found today." Matched on the
+    // middle of that sentence, so the apostrophe and the surrounding words
+    // are not load-bearing. The found caption ("something buried in the
+    // sand") is deliberately not matched: at that point the day is still
+    // yours to take, and the click takes it.
+    {
+      id: "forgottenshore",
+      name: "Forgotten Shore",
+      path: "/pirates/forgottenshore.phtml",
+      type: "daily",
+      used: /nothing of interest/i,
+    },
     { id: "desertedtomb", name: "Deserted Tomb", path: "/worlds/geraptiku/tomb.phtml", type: "daily" },
     { id: "omelette", name: "Giant Omelette", path: "/prehistoric/omelette.phtml", type: "daily", on: true },
     { id: "jelly", name: "Giant Jelly", path: "/jelly/jelly.phtml", type: "daily", on: true },
