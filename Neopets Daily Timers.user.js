@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.5
+// @version      2.6
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -175,6 +175,12 @@
     flashTitle: true,
     // Hide rows that are still counting down, leaving only what is ready.
     readyOnly: false,
+    // Make the Quest Log row wait for the NeoPass tab as well as Daily
+    // Quests. Off, because NeoPass quests are mostly logging in to two phone
+    // games and plenty of people never touch them - and a row that can only
+    // be finished by something you do not do is a row that says Ready for
+    // ever.
+    questlogNeoPass: false,
     // Rows past this are scrolled rather than drawn down the whole screen.
     maxRows: 12,
     // Point the rows whose own page is broken at the handler that still
@@ -198,6 +204,11 @@
   const SETTINGS_KEY = "np_timers_settings";
   const STATE_KEY = "np_timers_state";
   const LEGACY_SPRINGS_KEY = "np_healing_springs_state";
+  // The Quest Log's two tabs, each read on its own visit - see
+  // rememberQuestTab. Its own key rather than a field on the state above,
+  // because that entry is deleted whenever the row goes back to Ready and
+  // what the other tab said has to outlive that.
+  const QUESTLOG_KEY = "np_timers_questlog";
   const TAG = "[Neo Timers]";
 
   // --------------------------------------------------------------- registry
@@ -227,7 +238,9 @@
   //       - true, false, or null for "this page cannot tell". Only the Quest
   //       Log has one, because it is the only row where a single click is a
   //       fraction of the day rather than the day. It outranks everything
-  //       else and it is the only source that can also un-finish a row.
+  //       else and it is the only source that can also un-finish a row. It
+  //       may also keep its own notes between visits, as that one does: see
+  //       "the Quest Log's day" below.
   //   counter(): read the day's allowance off the page as {used, total}, the
   //       site's own figure rather than a tally kept here. hideCount keeps
   //       that figure out of the clock column, leaving the row to read Ready
@@ -676,32 +689,22 @@
       path: "/questlog/",
       type: "daily",
       on: true,
-      note: "Finished when every reward is claimed, on the Daily Quests tab and the NeoPass one.",
+      note: "Finished when the hub says you have earned the day's bonus. The setting can make it wait for the NeoPass tab as well.",
       settled() {
-        // The quest list itself, which is only there once the app has
-        // rendered. Empty is a real answer (every card claimed and removed);
-        // absent is not.
-        const box = document.getElementById("QuestLogQuests");
-        if (!box) return null;
-        let left = 0;
-        for (const card of box.querySelectorAll(".questlog-quest")) {
-          if (!card.classList.contains("ql-quest-claimed")) left += 1;
+        const tab = activeQuestTab();
+        if (!tab) return null;
+        if (tab === "neopass") {
+          const group = activeQuestGroupLabel();
+          // "" is a tab with no groups, which is this row's business; a named
+          // group has to be the dailies one. See activeQuestGroupLabel.
+          if (group && !/dail/i.test(group)) return null;
         }
-        // The bonus and the streaks, whose Claim control only exists while
-        // one is earned and unclaimed. A streak still weeks off carries no
-        // such control, so it cannot hold the row open.
-        left += document.querySelectorAll(".ql-bonus-claim").length;
-        // The other tab, as its own badge. Only the inactive ones: the badge
-        // is a figure from the server and is refreshed when you switch tabs
-        // or reload, not when you claim, so the active tab's own badge can
-        // sit there stale while its cards say otherwise - and its cards are
-        // the better evidence anyway.
-        for (const tab of document.querySelectorAll(".questlog-tabs .questlog-tab")) {
-          if (tab.classList.contains("tab-active")) continue;
-          const badge = tab.querySelector(".ql-notif");
-          left += Number((badge?.textContent || "").replace(/\D+/g, "")) || 0;
-        }
-        return left === 0;
+        const earned = questBonusEarned();
+        if (earned === null) return null;
+        const seen = rememberQuestTab(tab, earned);
+        // Daily Quests is the row. NeoPass only joins in when asked.
+        if (!seen.daily) return false;
+        return settings.questlogNeoPass ? !!seen.neopass : true;
       },
     },
     { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
@@ -1727,6 +1730,99 @@
       el.getAttribute("alt") || "",
     ].join(" ");
     return t.action.test(label);
+  }
+
+  // ----------------------------------------------------- the Quest Log's day
+  //
+  // The hub is two tabs - Daily Quests and NeoPass - each with its own set of
+  // quests and its own bonus, and it can only ever show you one of them. So
+  // "the day is finished" is a reading taken twice, once on each, and these
+  // four keep the halves: which tab is in front of us, which group within it,
+  // what its bonus line says, and what has been seen today.
+
+  // The tab, as "daily" or "neopass", or null before the app has rendered.
+  //
+  // Read off the label rather than the tab id. The ids are the site's own
+  // (2 and 3 today, and the config calls 3 the neoPassTabId), but a label is
+  // at least the thing the page shows you.
+  function activeQuestTab() {
+    const el = document.querySelector(".questlog-tabs .questlog-tab.tab-active");
+    if (!el) return null;
+    const label = el.textContent || "";
+    if (/neopass/i.test(label)) return "neopass";
+    if (/quest|dail/i.test(label)) return "daily";
+    return null;
+  }
+
+  // The group inside that tab, by label, or "" where the tab is one
+  // undivided list. The NeoPass tab is split into NeoPass Dailies and
+  // NeoPass Weeklies, and the bonus above the quests belongs to whichever of
+  // them is showing - so a row about today has to know which it is reading.
+  // Weeklies are a week's work and have no business holding a daily row open.
+  //
+  // The active group carries no class of its own. What marks it is the
+  // absence of a tabindex: the hub makes every *other* group focusable so you
+  // can switch to it (`v-bind="group.active ? {} : { tabindex: 0 }"`). That is
+  // the only signal the page offers, so it is the one used.
+  function activeQuestGroupLabel() {
+    const groups = [...document.querySelectorAll(".questlog-groups .ql-group")];
+    if (!groups.length) return "";
+    const live = groups.find((g) => !g.hasAttribute("tabindex"));
+    return live ? live.textContent || "" : "";
+  }
+
+  // Does the tab in front of us say its day is done? This is the hub's own
+  // sentence, above the quests:
+  //
+  //   "You've completed all your quests and earned your bonus!"
+  //
+  // against "Complete all quests shown before they expire to earn a bonus!"
+  // while any are outstanding.
+  //
+  // Scoped to #QuestLogBonusRewards deliberately: the streak block beside it
+  // carries a near-identical sentence - "...completed all your quests 7 days
+  // in a row and earned your bonus!" - which is about the week, not today.
+  //
+  // Note what this does and does not say. It is the quests being complete,
+  // not the rewards being collected: the line appears as soon as the bonus is
+  // ready to claim. For a Premium account those are the same moment (rewards
+  // auto-claim), and for everybody else this is the more useful of the two -
+  // the work is what the row is tracking, and an unclaimed reward is not a
+  // reason to go and do anything.
+  //
+  // Where a tab has no bonus block at all, its quest cards are the fallback:
+  // an unclaimed card, or an unclaimed bonus or streak reward, and the tab is
+  // not finished.
+  function questBonusEarned() {
+    const bonus = document.getElementById("QuestLogBonusRewards");
+    if (bonus) return /earned your bonus/i.test(bonus.textContent || "");
+    const box = document.getElementById("QuestLogQuests");
+    if (!box) return null;
+    let left = document.querySelectorAll(".ql-bonus-claim").length;
+    for (const card of box.querySelectorAll(".questlog-quest")) {
+      if (!card.classList.contains("ql-quest-claimed")) left += 1;
+    }
+    return left === 0;
+  }
+
+  // What has been seen today, per tab, kept against the NST date so it is
+  // thrown away with the quests it describes.
+  function rememberQuestTab(tab, finished) {
+    const today = nstDateKey();
+    const stored = readJSON(QUESTLOG_KEY, null);
+    const fresh = stored && stored.day === today;
+    const seen = fresh ? stored : { day: today, daily: false, neopass: false };
+    // Written only on a change, or this would rewrite the store every few
+    // seconds for as long as the hub is open.
+    if (!fresh || seen[tab] !== finished) {
+      seen[tab] = finished;
+      writeJSON(QUESTLOG_KEY, seen);
+      console.info(
+        `${TAG} questlog: the ${tab} tab says its quests are`
+        + ` ${finished ? "done" : "not done"} today`,
+      );
+    }
+    return seen;
   }
 
   function watchForVisit(t) {
@@ -2997,6 +3093,11 @@
     addGlobal("beep", "Beep when something is ready", null, fireBeep);
     addGlobal("flashTitle", "Flash the tab title", "while the tab is hidden");
     addGlobal("readyOnly", "Only list what is ready", "hide running countdowns");
+    addGlobal(
+      "questlogNeoPass",
+      "Quest Log waits for NeoPass too",
+      "both tabs' bonuses, not just Daily Quests",
+    );
     addGlobal("newTab", "Open links in a new tab");
     addGlobal(
       "compact",
