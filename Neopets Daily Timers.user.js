@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.7
+// @version      2.8
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -231,6 +231,13 @@
   //       way as path. The Fruit Machine has two.
   //   textOnly: only the page's own words mark this row. Nothing you click on
   //       it counts, because one go is not the whole thing - see Dice-A-Roo.
+  //   pageOnly: likewise for a row read by countdown() - nothing you click is
+  //       evidence, because the page already states the whole position. The
+  //       training schools.
+  //   href: where the row links, when that is not `path`. The training schools
+  //       match on their own address but answer on their status page.
+  //   cadenceWords: what the settings list says about how often, for a row
+  //       whose `mins` is a fallback rather than a cadence.
   //   breaks / breakWords: hours in the NST day when the activity is shut and
   //       the row cannot be done at all, as [startHour, endHour), plus the
   //       words for it. Both kings take three of them.
@@ -711,6 +718,55 @@
     },
     { id: "lab", name: "Lab Ray", path: "/lab.phtml", type: "daily", on: true },
     { id: "petpetlab", name: "Petpet Lab Ray", path: "/petpetlab.phtml", type: "daily" },
+
+    // ---- the training schools -------------------------------------------
+    // Not dailies at all: a course runs from an hour to several days, and what
+    // the row is for is the moment it ends. All three read the same way - see
+    // trainingCountdown - and all three link to their status page rather than
+    // their course list, because the status page is the one that answers.
+    //
+    // `mins` is only the fallback for a hand-tick, and an hour is the shortest
+    // course the cheapest school sells; the next visit replaces the guess with
+    // the page's own figure.
+    {
+      id: "training",
+      name: "Training School",
+      path: "/island/training.phtml",
+      href: "/island/training.phtml?type=status",
+      type: "interval",
+      mins: 1 * HOUR,
+      cadenceWords: "as long as the course takes",
+      pageOnly: true,
+      on: true,
+      note: "Mystery Island, paid in codestones. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
+      countdown: trainingCountdown,
+    },
+    {
+      id: "ninjatraining",
+      name: "Secret Ninja Training School",
+      path: "/island/fight_training.phtml",
+      href: "/island/fight_training.phtml?type=status",
+      type: "interval",
+      mins: 1 * HOUR,
+      cadenceWords: "as long as the course takes",
+      pageOnly: true,
+      on: true,
+      note: "The school for pets past level 250, paid in codestones. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
+      countdown: trainingCountdown,
+    },
+    {
+      id: "academy",
+      name: "Swashbuckling Academy",
+      path: "/pirates/academy.phtml",
+      href: "/pirates/academy.phtml?type=status",
+      type: "interval",
+      mins: 1 * HOUR,
+      cadenceWords: "as long as the course takes",
+      pageOnly: true,
+      on: true,
+      note: "Cap'n Threelegs', paid in dubloons. Ready when a course is finished or no pet is on one; the clock is the first pet to finish.",
+      countdown: trainingCountdown,
+    },
     { id: "coincidence", name: "The Coincidence", path: "/space/coincidence.phtml", type: "daily" },
     { id: "mystic", name: "Island Mystic", path: "/island/mystichut.phtml", type: "daily" },
     { id: "haiku", name: "Haiku Generator", path: "/island/haiku/", type: "daily" },
@@ -939,7 +995,8 @@
     "omelette", "gravedanger", "tombola", "springs", "neggcave", "wiseking",
     "grumpyking", "lottery", "marrow", "dicearoo", "slots", "kikopop",
     "expellibox", "strength", "buriedtreasure", "cocoshy", "bagatelle",
-    "wishingwell", "lab", "petpetlab", "excitement", "knowledge",
+    "wishingwell", "lab", "petpetlab", "training", "ninjatraining",
+    "academy", "excitement", "knowledge",
     "mediocrity", "misfortune", "monotony", "extravagance", "starlight",
     "hauntedkiosk", "icekiosk",
   ];
@@ -1005,6 +1062,9 @@
     bank: "items/ltoo_scorch_bank.gif",
     questlog: "items/toy_hannah_action.gif",
     faeriequest: "items/mall_fortcookie_4.gif",
+    training: "items/codestone12.gif",
+    ninjatraining: "items/codestone3.gif",
+    academy: "items/dubloon2.gif",
     lab: "items/labmap_09.gif",
     petpetlab: "items/petpetlab_soot.gif",
     coincidence: "items/rpp_reu2014_robotassispetpet.gif",
@@ -1453,6 +1513,52 @@
   // beyond the shape they return - a daily reads the store and the clock, an
   // allowance reads a tally, a window is arithmetic - and reading one of them
   // used to mean scrolling past the other three.
+  // The three training schools, which all print the same two lines per pet on
+  // their status page:
+  //
+  //     Time till course finishes :
+  //     6 hrs, 0 minutes, 0 seconds
+  //
+  // or, once the time is up, "Course Finished!" beside a Complete Course!
+  // button.
+  //
+  // More than one pet can be on a course at once, so this is a reading of all
+  // of them rather than of one timer:
+  //
+  //   - a finished course, or no pet on a course at all, and the row is ready:
+  //     either way the school wants you now, to collect or to start;
+  //   - otherwise it counts down to the first pet to finish, because that is
+  //     the next time there is anything to do.
+  //
+  // Answered only on the status page. The courses page lists what can be
+  // studied rather than who is studying, so it knows neither, and null leaves
+  // whatever the panel is already holding alone.
+  function trainingCountdown() {
+    if (!/type=status/i.test(location.search)) return null;
+    const said = document.body?.innerText || "";
+    // Something to collect outranks every countdown beside it.
+    if (/course\s+finished/i.test(said)) return 0;
+    const waits = [
+      ...said.matchAll(
+        /till\s+course\s+finishes\s*:?\s*(\d+)\s*hrs?\D+(\d+)\s*minutes?\D+(\d+)\s*seconds?/gi,
+      ),
+    ].map((m) => (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000);
+    if (waits.length) return Math.min(...waits);
+    // A pet is listed as studying but its countdown did not parse - the school
+    // has been restyled, or it says the time some other way. Saying nothing is
+    // right here: reporting the row ready would throw away a real timer.
+    //
+    // Matched on the whole per-pet heading, "<name> (Level 323) is currently
+    // studying Strength", and not on "currently studying" alone: the page that
+    // says nobody is training says it as "No Neopets are currently studying a
+    // course", which the looser pattern read as a pet whose clock had gone
+    // missing - so the one state this function exists to report, the row being
+    // ready, was the one it refused to report.
+    if (/\(Level\s+\d+\)\s*is\s+currently\s+studying/i.test(said)) return null;
+    // Nobody studying, so there is a course to start.
+    return 0;
+  }
+
   function rowState(t) {
     if (t.type === "daily") return dailyRowState(t);
     if (t.type === "allowance") return allowanceRowState(t);
@@ -1932,6 +2038,11 @@
     if (readSettled(t)) return;
     if (readBypassPage(t)) return;
     if (readPageText(t)) return;
+    // Rows the page reports on in full, where a click adds nothing: a training
+    // school prints every pet's own countdown, so a click on Complete Course!
+    // is the end of the old timer rather than the start of a new one, and the
+    // next visit will say what the new one is.
+    if (t.pageOnly) return;
     watchForAction(t);
   }
 
@@ -2888,7 +2999,10 @@
 
   function rowHref(t) {
     if (needsGuideFirst(t)) return t.guide;
-    return usingBypass(t) ? t.bypass : t.path;
+    if (usingBypass(t)) return t.bypass;
+    // `href` for the rows whose own answer is on a different page from the one
+    // `path` matches: a training school's status page rather than its courses.
+    return t.href || t.path;
   }
 
   function linkTitle(t, st, direct) {
@@ -3103,6 +3217,10 @@
   }
 
   function cadenceText(t) {
+    // For the rows with no cadence to state. A training course runs from an
+    // hour to several days depending on the stat and the pet, so "every hour"
+    // would be a number this script made up.
+    if (t.cadenceWords) return t.cadenceWords;
     if (t.type === "allowance") return t.everyWords || `${t.uses} times a day`;
     if (t.randomStart) return "once a day, random start hour";
     if (t.type === "daily") return "resets at midnight NST";
@@ -3368,123 +3486,130 @@
     // question in front of this list is "is this one on", and a category is no
     // help answering it twice. One list in one order is also the only thing
     // you can drag within, and dragging is what sets the panel's order.
-    {
-      const listHead = document.createElement("h4");
-      listHead.textContent = "Dailies";
-      scroll.appendChild(listHead);
+    const listHead = document.createElement("h4");
+    listHead.textContent = "Dailies";
+    scroll.appendChild(listHead);
 
-      const list = document.createElement("div");
-      list.id = "nptm-list";
-      scroll.appendChild(list);
+    const list = document.createElement("div");
+    list.id = "nptm-list";
+    scroll.appendChild(list);
 
-      // The dragged row moves through the list as you go, so the list itself
-      // is the preview. Dropping just writes down what it already shows.
-      let dragRow = null;
-      const commitOrder = () => {
-        settings.order = [...list.children].map((el) => el.dataset.id);
-        saveSettings();
-        render();
-      };
-      list.addEventListener("dragover", (e) => {
-        if (dragRow) e.preventDefault();
-      });
-      list.addEventListener("drop", (e) => {
-        if (dragRow) e.preventDefault();
-      });
+    // The dragged row moves through the list as you go, so the list itself
+    // is the preview. Dropping just writes down what it already shows.
+    const drag = { row: null };
+    const commitOrder = () => {
+      settings.order = [...list.children].map((el) => el.dataset.id);
+      saveSettings();
+      render();
+    };
+    list.addEventListener("dragover", (e) => {
+      if (drag.row) e.preventDefault();
+    });
+    list.addEventListener("drop", (e) => {
+      if (drag.row) e.preventDefault();
+    });
 
-      for (const t of orderedTrackers()) {
-        const row = document.createElement("div");
-        row.className = "nptm-opt nptm-sortable";
-        row.dataset.id = t.id;
-
-        // The handle, not the whole row: a row is mostly a checkbox and a
-        // label, and starting a drag from either of those fights the thing
-        // they are for.
-        const grip = document.createElement("span");
-        grip.className = "nptm-grip";
-        grip.innerHTML = GRIP_SVG;
-        grip.title = "Drag to reorder \u2014 the panel follows this order";
-        grip.draggable = true;
-        grip.addEventListener("dragstart", (e) => {
-          dragRow = row;
-          row.classList.add("is-dragging");
-          if (e.dataTransfer) {
-            e.dataTransfer.effectAllowed = "move";
-            try {
-              e.dataTransfer.setData("text/plain", t.id);
-            } catch {
-              /* some browsers refuse the payload; the drag still works */
-            }
-          }
-        });
-        // Fires on a drop and on a cancelled drag alike, and by then the list
-        // is already in whatever order you left it in, so one handler writes
-        // both outcomes down.
-        grip.addEventListener("dragend", () => {
-          row.classList.remove("is-dragging");
-          dragRow = null;
-          commitOrder();
-        });
-        row.appendChild(grip);
-
-        row.addEventListener("dragover", (e) => {
-          if (!dragRow || dragRow === row) return;
-          e.preventDefault();
-          const box = row.getBoundingClientRect();
-          const below = e.clientY > box.top + box.height / 2;
-          list.insertBefore(dragRow, below ? row.nextSibling : row);
-        });
-
-        row.appendChild(iconFor(t));
-
-        const box = document.createElement("input");
-        box.type = "checkbox";
-        box.id = `nptm-on-${t.id}`;
-        box.checked = isOn(t.id);
-        box.addEventListener("change", () => {
-          settings.enabled[t.id] = box.checked;
-          if (box.checked && settings.alerts[t.id] === undefined) {
-            settings.alerts[t.id] = true;
-          }
-          saveSettings();
-          bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
-          render();
-        });
-        row.appendChild(box);
-
-        const label = document.createElement("label");
-        label.className = "nptm-opt-name";
-        label.htmlFor = box.id;
-        label.textContent = t.name;
-        row.appendChild(label);
-
-        const when = document.createElement("span");
-        when.className = "nptm-opt-when";
-        // The cadence only. There was a second clause here saying how the row
-        // gets detected ("watches the page's own requests" and the like),
-        // which answered a question about the script rather than about the
-        // daily: sixty rows each explaining their own plumbing, in a list
-        // whose job is picking what to track. Where detection matters it is
-        // already on the row in the panel, in its tooltip, as what the timer
-        // was actually set from.
-        when.textContent = cadenceText(t);
-        row.appendChild(when);
-
-        const bell = document.createElement("button");
-        bell.type = "button";
-        bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
-        bell.textContent = "\u{1F514}";
-        bell.title = "Alert when this one is ready";
-        bell.addEventListener("click", () => {
-          settings.alerts[t.id] = !alertsOn(t.id);
-          saveSettings();
-          bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
-        });
-        row.appendChild(bell);
-
-        list.appendChild(row);
-      }
+    for (const t of orderedTrackers()) {
+      list.appendChild(buildTrackerOption(t, { list, drag, commitOrder }));
     }
+  }
+
+  // One row of that list: a drag handle, the checkbox, the activity's icon
+  // and name, when it comes back, and its own alert bell.
+  //
+  // `drag` is a holder rather than a plain variable because the dragged row
+  // has to be reachable from every other row's dragover handler, and a row
+  // is built one at a time.
+  function buildTrackerOption(t, { list, drag, commitOrder }) {
+    const row = document.createElement("div");
+    row.className = "nptm-opt nptm-sortable";
+    row.dataset.id = t.id;
+
+    // The handle, not the whole row: a row is mostly a checkbox and a
+    // label, and starting a drag from either of those fights the thing
+    // they are for.
+    const grip = document.createElement("span");
+    grip.className = "nptm-grip";
+    grip.innerHTML = GRIP_SVG;
+    grip.title = "Drag to reorder \u2014 the panel follows this order";
+    grip.draggable = true;
+    grip.addEventListener("dragstart", (e) => {
+      drag.row = row;
+      row.classList.add("is-dragging");
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        try {
+          e.dataTransfer.setData("text/plain", t.id);
+        } catch {
+          /* some browsers refuse the payload; the drag still works */
+        }
+      }
+    });
+    // Fires on a drop and on a cancelled drag alike, and by then the list
+    // is already in whatever order you left it in, so one handler writes
+    // both outcomes down.
+    grip.addEventListener("dragend", () => {
+      row.classList.remove("is-dragging");
+      drag.row = null;
+      commitOrder();
+    });
+    row.appendChild(grip);
+
+    row.addEventListener("dragover", (e) => {
+      if (!drag.row || drag.row === row) return;
+      e.preventDefault();
+      const box = row.getBoundingClientRect();
+      const below = e.clientY > box.top + box.height / 2;
+      list.insertBefore(drag.row, below ? row.nextSibling : row);
+    });
+
+    row.appendChild(iconFor(t));
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = `nptm-on-${t.id}`;
+    box.checked = isOn(t.id);
+    box.addEventListener("change", () => {
+      settings.enabled[t.id] = box.checked;
+      if (box.checked && settings.alerts[t.id] === undefined) {
+        settings.alerts[t.id] = true;
+      }
+      saveSettings();
+      bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+      render();
+    });
+    row.appendChild(box);
+
+    const label = document.createElement("label");
+    label.className = "nptm-opt-name";
+    label.htmlFor = box.id;
+    label.textContent = t.name;
+    row.appendChild(label);
+
+    const when = document.createElement("span");
+    when.className = "nptm-opt-when";
+    // The cadence only. There was a second clause here saying how the row
+    // gets detected ("watches the page's own requests" and the like),
+    // which answered a question about the script rather than about the
+    // daily: sixty rows each explaining their own plumbing, in a list
+    // whose job is picking what to track. Where detection matters it is
+    // already on the row in the panel, in its tooltip, as what the timer
+    // was actually set from.
+    when.textContent = cadenceText(t);
+    row.appendChild(when);
+
+    const bell = document.createElement("button");
+    bell.type = "button";
+    bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+    bell.textContent = "\u{1F514}";
+    bell.title = "Alert when this one is ready";
+    bell.addEventListener("click", () => {
+      settings.alerts[t.id] = !alertsOn(t.id);
+      saveSettings();
+      bell.className = "nptm-bell" + (alertsOn(t.id) ? " is-on" : "");
+    });
+    row.appendChild(bell);
+    return row;
   }
 
   // Default, Default order, None and Done. The first three all end the
