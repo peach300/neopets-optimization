@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.4
+// @version      2.5
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -25,14 +25,15 @@
 //
 // THE ORDER THE ROWS COME IN
 //
-// What is ready sits at the top, then what is closest to being ready, and
-// your own order decides only between rows that come back at the same time -
-// which, for the dozen rows that all reset at midnight NST, is all of them.
-// So the drag order in the settings still does the work it always did, on the
-// group where it is the only thing left to go on, and the top of the panel is
-// the part worth reading. Before this the list was fixed: Jellyneo's dailies
-// order, or yours, with the ready rows scattered through it and the ones
-// twelve hours out at the top.
+// Two groups. What is ready sits at the top, in the order you dragged it
+// into, because that order is a running order and "ready" carries no clock to
+// sort on. Everything still counting down follows, soonest first, and the
+// drag order has no say there at all: a waiting row is a wait, and how long
+// is the only thing about it worth ordering by.
+//
+// Before this the whole list was fixed - Jellyneo's dailies order, or yours,
+// with the ready rows scattered through it and the ones twelve hours out at
+// the top.
 //
 // The cadences come from Jellyneo's dailies list (jellyneo.net/?go=dailies),
 // read on 2026-11-18. Three kinds are tracked, because three kinds is what
@@ -1575,26 +1576,32 @@
     return [...TRACKERS].sort((a, b) => place(a) - place(b));
   }
 
-  // What the panel lists, in the order it lists them: soonest first, with
-  // your own order used only between rows that come back at the same time.
+  // What the panel lists, in the order it lists them. Two groups, and they
+  // are ordered on different things.
   //
-  // Ready rows sort above everything as a group, and inside that group there
-  // is nothing left to sort by but your order - which is the right answer for
-  // a handful of rows all waiting on you equally.
+  // What is ready sits at the top, in the order you dragged it into. These
+  // are the rows you are about to go and do, so their order is a running
+  // order and nothing else could sort them: "ready" carries no clock to
+  // compare.
   //
-  // The wait is bucketed to the minute rather than compared outright. Every
-  // row that resets at midnight NST is within a few seconds of every other
-  // one, and those seconds are nothing but the order you happened to tick
-  // them off in; sorting on them would shuffle a dozen rows against each
-  // other every day for a difference no reader could see. A minute is coarse
-  // enough to leave that midnight cohort in the order you dragged it into,
-  // and fine enough that anything genuinely sooner still sits above it.
+  // Everything else follows, strictly soonest first, and your order has no
+  // say in it at all. A row that is counting down is not something you are
+  // choosing between; it is a wait, and the only question it answers is how
+  // long. (An earlier pass bucketed these to the minute so the midnight
+  // cohort kept your order - the seconds between those rows being nothing
+  // but the order you happened to tick them off in. Dropped on purpose: the
+  // waiting half of the panel is now a plain clock, top to bottom.)
+  //
+  // place() is still the last tiebreak below, for two rows whose wait is
+  // equal to the millisecond. It keeps the sort stable rather than leaving
+  // the pair to swap about.
   function sortForPanel(rows) {
     const place = new Map(orderedTrackers().map((t, i) => [t.id, i]));
-    const soon = ({ st }) => (st.ready ? -1 : Math.max(0, Math.round(st.ms / 60_000)));
-    return [...rows].sort(
-      (a, b) => soon(a) - soon(b) || place.get(a.t.id) - place.get(b.t.id),
-    );
+    return [...rows].sort((a, b) => {
+      if (a.st.ready !== b.st.ready) return a.st.ready ? -1 : 1;
+      if (!a.st.ready && a.st.ms !== b.st.ms) return a.st.ms - b.st.ms;
+      return place.get(a.t.id) - place.get(b.t.id);
+    });
   }
 
   function activeTrackers() {
