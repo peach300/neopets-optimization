@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      3.3
+// @version      3.4
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -412,17 +412,27 @@
       name: "Grave Danger",
       path: "/halloween/gravedanger/",
       type: "interval",
-      // Only the fallback now, for a timer started by a click rather than
-      // read: an adventure lasts anywhere from four to ten hours, and four is
-      // the earliest it could possibly be back. `countdown` below is what
-      // normally sets this row, and this figure is used only when the page
-      // could not be read at all.
+      // Only the fallback now, and only for a row marked off by hand:
+      // `countdown` below is what sets this row, and it is the one source
+      // this activity has. Four hours because an adventure lasts anywhere
+      // from four to ten, so it is the earliest the Petpet could be back.
       mins: 4 * HOUR,
-      note: "Four to ten hours \u2014 the page's own countdown is read when you visit.",
+      note: "Four to ten hours, counted from the moment a Petpet goes in \u2014 collecting one is the end of an adventure, not the start of the next. The page's own countdown is read while you are on it.",
       on: true,
       // Grave Danger is the one activity that prints how long is left, so
       // there is no need to assume the shortest adventure and then be wrong
-      // by up to six hours. Two readings of the same number, best first:
+      // by up to six hours.
+      //
+      // It is also the one activity whose cooldown does not begin when you
+      // finish with it. Collecting a Petpet ends an adventure and leaves the
+      // Crypt free: you can send another in that second, and until you do
+      // there is nothing to wait for. So this row is read and never inferred
+      // — a click here used to mark it done for four hours, which was the
+      // waiting room described as the adventure. The clock starts when a
+      // Petpet goes underground, which is the moment the page below starts
+      // printing a countdown.
+      //
+      // Two readings of the same number, best first:
       //
       //   GDActive.target is the server timestamp the page's own counter
       //   counts down to, and GD.offset is its correction for a browser clock
@@ -2153,21 +2163,41 @@
   //    arrive is news whether or not this browser started it.
   function readCountdown(t) {
     if (!t.countdown) return false;
-    const left = t.countdown();
-    // The page has no countdown on it this time, which is not the same as a
-    // countdown of zero: it says nothing, so the sources below get their turn.
-    if (left === null) return false;
-    if (left > 0) {
-      markUntil(t.id, Date.now() + left, "page");
-      // Nothing you can do while it is out there counts as a go, so the
-      // request and click watchers are never armed.
-      return true;
-    }
-    // It is back. A timer still held here over-ran (four hours was the
-    // guess, and the adventure was longer), or the adventure ended some
-    // other way; either way the row should say ready.
-    clearDone(t.id);
-    return false;
+    const read = () => {
+      const left = t.countdown();
+      // The page has no countdown on it this time, which is not the same as a
+      // countdown of zero: it says nothing, so nothing is written either way.
+      // On Grave Danger this is the Petpet standing at the gate waiting to be
+      // collected — the adventure is over and the next has not begun, which is
+      // a row with no timer and nothing to correct.
+      if (left === null) return;
+      if (left > 0) {
+        // markUntil holds its own guard against rewriting the same number, so
+        // re-reading the same countdown costs nothing after the first.
+        markUntil(t.id, Date.now() + left, "page");
+        return;
+      }
+      // It is back. A timer still held here over-ran (a hand-marked four hours
+      // against an adventure that ran ten), or the adventure ended some other
+      // way; either way the row should say ready. Only when there is something
+      // to clear, since this runs every few seconds and clearing nothing would
+      // rewrite the store for as long as the page is open.
+      if (readStates()[t.id]) clearDone(t.id);
+    };
+    read();
+    // Re-read, like the counter and the settled hook below. Both ends of a
+    // Grave Danger adventure happen without a page load: sending a Petpet in
+    // is the moment this row's clock should start, and on one reading taken at
+    // load time it would not start until the next visit — the row would read
+    // ready with a Petpet underground. Collecting is the mirror of it, and the
+    // reason this row no longer watches for clicks at all: the countdown goes,
+    // the picker comes up, and within a few seconds the row says ready, which
+    // it is.
+    setInterval(read, 5000);
+    // Nothing below is armed, whatever the reading was. A page that states the
+    // whole position outranks anything inferred from a click on it, and a page
+    // that states nothing is not evidence for a click either.
+    return true;
   }
 
   // 0b. The page states how many of the day's allowance are gone. The
