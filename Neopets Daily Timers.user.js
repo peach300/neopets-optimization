@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      3.2
+// @version      3.3
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -210,6 +210,29 @@
   // what the other tab said has to outlive that.
   const QUESTLOG_KEY = "np_timers_questlog";
   const TAG = "[Neo Timers]";
+
+  // Only the top document draws the panel. The @match is the whole site, and
+  // some pages put their game in a same-origin <iframe> \u2014 Trudy's Surprise
+  // frames /trudydaily/game.phtml \u2014 so the script ran there as well and drew
+  // a second panel inside the frame, which on Trudy's lands in the middle of
+  // the page because the frame is its own little window with its own corners.
+  //
+  // Detection is left armed in a frame even though the panel is not drawn: a
+  // framed page is still a page, and if one of them ever is the activity's own
+  // page, the request and submit watchers are where they need to be. Nothing
+  // is rendered there, so the two instances cannot disagree about what is on
+  // screen; they share one store, which is the only state that matters.
+  //
+  // window.top is readable across origins, but the comparison is wrapped
+  // anyway: a frame this script cannot compare itself to is not the top one,
+  // and drawing nothing is the safe way to be wrong.
+  const TOP_FRAME = (() => {
+    try {
+      return window.top === window.self;
+    } catch {
+      return false;
+    }
+  })();
 
   // --------------------------------------------------------------- registry
   //
@@ -3231,6 +3254,11 @@
   }
 
   function render() {
+    // Guarded here as well as at the one call site that starts the clock,
+    // because marking a row re-renders: without this, a watcher firing inside
+    // a frame would build the panel this function is otherwise never asked
+    // for there.
+    if (!TOP_FRAME) return;
     if (!panel) buildPanel();
 
     // `needsYou` survives the ready-only filter. Symol Hole with no window
@@ -3775,6 +3803,9 @@
       watchForVisit(here);
       console.info(`${TAG} on ${here.name}`);
     }
+    // A sub-frame watches and stores; the panel and its clock belong to the
+    // page you are actually looking at.
+    if (!TOP_FRAME) return;
     render();
     // Derived from stored timestamps rather than accumulated ticks, so a
     // throttled or suspended tab still shows the right number when read.
