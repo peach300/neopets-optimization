@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      3.1
+// @version      3.2
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -588,9 +588,6 @@
       // question. The overview can only say whether betting is open at all.
       href: "/pirates/foodclub.phtml?tab=bet",
       type: "daily",
-      // On, unlike the three training schools: a row nobody can see is not an
-      // added row, and this one was asked for by name.
-      on: true,
       note: "Ten bets a round. The row reads the bet page's own count for the round in front of you, so it comes back when a new round opens \u2014 which is any time from about 2:15pm NST \u2014 and not only at midnight. Winnings keep for seven days.",
       resetsAt: "midnight NST, or sooner when the bet page shows a new round",
       settled() {
