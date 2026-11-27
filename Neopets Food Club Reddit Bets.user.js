@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Food Club Reddit Bets
 // @namespace    local-advisor-fork
-// @version      2.0
+// @version      2.1
 // @description  A panel on the Food Club page with one button to the "Food Club" flair feed on r/neopets, where the day's bets are posted, and the NST date its title will carry. It never places, picks or collects a bet.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/pirates/foodclub.phtml*
@@ -43,16 +43,19 @@
 // is live, needs nothing read and has the day's post at the top of it. One
 // click instead of none, which is the whole job.
 //
-// The panel still prints the Neopian date, because that is the one piece the
+// WHAT IS LEFT OF IT
+//
+// A name and a button. The date, the found-post line and the note about the
+// feed's order were all read once and then stood there being read again
+// every day after, which is a lot of panel for a link.
+//
+// The date is still worth having, though, because it is the one piece the
 // feed does not give you: the titles are all alike apart from the date, so
-// knowing which date to look for is how you tell today's post from the one
-// above it that is still yesterday's.
-//
-// NST, NOT YOUR CLOCK
-//
-// That date is the Neopian one, read off US Pacific rather than off wherever
-// you are sitting. Past midnight NST in Europe, a local date would have you
-// looking for tomorrow's post, which does not exist yet.
+// knowing which to look for is how you tell today's post from the one above
+// it that is still yesterday's. It is on the header as a tooltip, where it
+// costs no room. It is the Neopian date, read off US Pacific rather than off
+// wherever you are sitting: past midnight NST in Europe a local date would
+// have you looking for tomorrow's post, which does not exist yet.
 //
 // SCOPE, and the ground rule
 //
@@ -90,15 +93,6 @@
       month: "long",
       day: "numeric",
       year: "numeric",
-    }).format(when);
-  }
-
-  // The same date, short, for the panel's header.
-  function nstDateShort(when = new Date()) {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Los_Angeles",
-      month: "short",
-      day: "numeric",
     }).format(when);
   }
 
@@ -159,30 +153,18 @@
       flex: 1 1 auto !important; white-space: nowrap !important;
       overflow: hidden !important; text-overflow: ellipsis !important;
     }
-    #npfc-day {
-      flex: none !important; font: 10.5px/1.4 ${MUSEO} !important;
-      opacity: 0.9 !important;
-    }
     #npfc-body {
       background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
       padding: 6px 8px 8px !important; border-radius: 0 0 9px 9px !important;
     }
-    #npfc-label {
-      color: #4a5a6a !important; font: 11px/1.4 ${MUSEO} !important;
-      margin: 0 0 1px !important;
-    }
-    /* The date the title will carry, which is the one thing you have to match
-       by eye once the feed is open, so it is the loudest thing in the body. */
-    #npfc-date {
-      color: #1b4f85 !important; font: 11.5px/1.35 ${MUSEO} !important;
-      margin: 0 0 6px !important;
-    }
-    #npfc-note {
-      color: #6a7a8c !important; font: 10.5px/1.35 ${MUSEO} !important;
-      margin: 0 0 6px !important;
-    }
     #npfc-btn {
-      display: block !important; width: 100% !important; margin: 0 !important;
+      /* Flex rather than the house style's block, because the label now has
+         the off-site arrow beside it and the two have to centre as one thing.
+         text-align is left in place for the same reason it is everywhere
+         else here: it is what the page would otherwise impose. */
+      display: flex !important; align-items: center !important;
+      justify-content: center !important; gap: 5px !important;
+      width: 100% !important; margin: 0 !important;
       padding: 3px 10px 7px !important; cursor: pointer !important;
       position: relative !important; overflow: hidden !important;
       outline: none !important; text-align: center !important;
@@ -209,7 +191,48 @@
                   inset 0 2px 0 1px rgba(253,249,220,1),
                   0 0 0 2px rgba(0,0,0,1) !important;
     }
+    /* Lifted by 2px: Cafeteria sits high in its box (which is why the button
+       is padded 3px over 7px), so an arrow centred on the flex line reads as
+       sitting below the letters rather than with them. */
+    #npfc-icon {
+      display: block !important; flex: none !important;
+      margin-bottom: 2px !important;
+    }
   `;
+
+  // The off-site arrow: a box with one corner open and an arrow leaving
+  // through it, which is the shape every site uses for "this opens somewhere
+  // else". Inline SVG rather than a glyph or an icon font, per the house
+  // style - it inherits the button's own colour and cannot arrive late or
+  // 404 into an empty square.
+  function offSiteIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.id = "npfc-icon";
+    svg.setAttribute("viewBox", "0 0 24 24");
+    // 11px against an 11pt label: the arrow is a note about the button, not
+    // half of it.
+    svg.setAttribute("width", "11");
+    svg.setAttribute("height", "11");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.6");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    // The three sides of the box that are drawn, left open at the top right.
+    const box = document.createElementNS(NS, "path");
+    box.setAttribute("d", "M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5");
+    svg.appendChild(box);
+    // The arrow through the gap: the shaft, then the corner it points into.
+    const shaft = document.createElementNS(NS, "path");
+    shaft.setAttribute("d", "M10 14 21 3");
+    svg.appendChild(shaft);
+    const head = document.createElementNS(NS, "path");
+    head.setAttribute("d", "M15 3h6v6");
+    svg.appendChild(head);
+    return svg;
+  }
 
   function injectStyles() {
     if (document.getElementById("npfc-style")) return;
@@ -234,38 +257,24 @@
     title.id = "npfc-title";
     // Where the bets come from, not what the script is: on the Food Club page
     // the game is not the thing in doubt.
-    title.textContent = "Reddit bets";
-    const day = document.createElement("span");
-    day.id = "npfc-day";
-    day.textContent = nstDateShort();
-    day.title = `${today} NST`;
+    title.textContent = "Food Club Bets";
     head.appendChild(title);
-    head.appendChild(day);
+    // The Neopian date is no longer printed - the panel is a button and a
+    // name - but it is still the thing you match by eye once the feed is
+    // open, so it is kept where it costs no room.
+    head.title = `Today is ${today} NST`;
     panel.appendChild(head);
 
     const body = document.createElement("div");
     body.id = "npfc-body";
 
-    const label = document.createElement("div");
-    label.id = "npfc-label";
-    label.textContent = "Look for";
-    body.appendChild(label);
-
-    const date = document.createElement("div");
-    date.id = "npfc-date";
-    date.textContent = today;
-    date.title = `${today} NST`;
-    body.appendChild(date);
-
-    const note = document.createElement("div");
-    note.id = "npfc-note";
-    note.textContent = "Newest first, so today's is at the top once it is up.";
-    body.appendChild(note);
-
     const btn = document.createElement("button");
     btn.id = "npfc-btn";
     btn.type = "button";
-    btn.textContent = "Open bets feed";
+    const word = document.createElement("span");
+    word.textContent = "Reddit";
+    btn.appendChild(word);
+    btn.appendChild(offSiteIcon());
     btn.title = FLAIR_URL;
     // window.open rather than a link, so the one control in the panel is the
     // site's own button and not a button-shaped anchor.
