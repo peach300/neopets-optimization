@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      2.9
+// @version      3.0
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -899,25 +899,39 @@
       name: "Wishing Well",
       path: "/wishing.phtml",
       paths: ["/process_wishing.phtml"],
-      type: "allowance",
-      uses: 7,
+      // Once a window, not seven times. This was an allowance counting the
+      // well's own "Wish Count: N" towards seven, and the tally was both more
+      // than the row needed and wrong in practice: seven is the well's limit,
+      // but a window's worth of wishing is one errand, and "3/7" on the row
+      // was reporting a number nobody was going to act on. Whether the window
+      // has been used at all is the thing worth knowing.
+      type: "daily",
       on: true,
-      note: "7 wishes a twelve-hour window, 21 NP each. The well grants and wipes its slate at about 8am and 8pm NST, which is when this row comes back.",
+      note: "One errand a twelve-hour window (the well allows seven wishes, 21 NP each). It grants and wipes its slate at about 8am and 8pm NST, which is when this row comes back.",
+      // Not midnight, like every other daily here: the well's day is the
+      // twelve hours to its next grant. See msUntilWellGrant.
       resetsIn: msUntilWellGrant,
       resetsAt: "the next grant, about 8am or 8pm NST",
       spanWords: "this window",
-      everyWords: "7 a twelve-hour window",
-      counter() {
+      settled() {
+        // The well's own figure, read as a yes or no rather than as a tally.
+        // It belongs to the window and is wiped at the grant, so any count at
+        // all means this window has been used, and a zero means it has not -
+        // which is the one thing a click can never tell us, a wiped slate
+        // looking exactly like a window nobody has touched.
+        //
         // Read off the whole page rather than the <b> it is printed in, since
-        // nothing promises the tag. The page a wish lands on may not print it
-        // at all, in which case this reads nothing and the next visit to the
-        // well sets the row straight.
+        // nothing promises the tag.
+        //
+        // Page-read and nothing else - a settled() stops the chain before the
+        // click and submit watchers, here as on the Quest Log, which is why
+        // this row carries no `action`. The well's own page always prints the
+        // count, so the only visit this cannot read is the one a wish lands
+        // on, and that page is not where you find out how the window is
+        // going: the next look at the well is, and it says so.
         const m = (document.body?.textContent || "").match(/Wish\s*Count:\s*(\d+)/i);
         if (!m) return null;
-        const used = Number(m[1]);
-        // Seven is the well's own limit; a figure past it is not this counter.
-        if (used > 7) return null;
-        return { used, total: 7 };
+        return Number(m[1]) > 0;
       },
     },
 
@@ -1193,7 +1207,7 @@
       if (prev && prev.spent) return;
       const count = Math.min(t.uses, (prev?.count || 0) + 1);
       states[id] = {
-        endTime: prev ? prev.endTime : Date.now() + allowanceResetIn(t),
+        endTime: prev ? prev.endTime : Date.now() + resetIn(t),
         count,
         src,
       };
@@ -1203,7 +1217,7 @@
     }
     const until =
       t.type === "daily"
-        ? msUntilNstMidnight()
+        ? resetIn(t)
         : (t.cooldownMins || t.mins) * 60_000;
     states[id] = { endTime: Date.now() + until, src };
     // The row's own account of why it is standing down, where the source
@@ -1248,7 +1262,7 @@
     // every few seconds; without this the store and the log would churn.
     if (fresh && fresh.src === "page" && fresh.count === used && fresh.total === total) return;
     states[id] = {
-      endTime: fresh ? fresh.endTime : Date.now() + allowanceResetIn(t),
+      endTime: fresh ? fresh.endTime : Date.now() + resetIn(t),
       count: used,
       total,
       spent: used >= total,
@@ -1268,7 +1282,7 @@
     if (!t || t.type !== "allowance") return;
     const states = readStates();
     states[id] = {
-      endTime: Date.now() + allowanceResetIn(t),
+      endTime: Date.now() + resetIn(t),
       count: t.uses,
       spent: true,
       src: "text",
@@ -1392,15 +1406,20 @@
     return (86400 - secs + marks[0]) * 1000;
   }
 
-  // An allowance's own day, and the words for it: four defaults in one place,
-  // so every row that does run on the NST day says nothing about any of this.
-  function allowanceResetIn(t) {
+  // A row's own day, and the words for it: three defaults in one place, so
+  // every row that does run on the NST day says nothing about any of this.
+  //
+  // These began as allowance-only, because the Wishing Well's seven wishes
+  // were the only thing here not running to midnight. The well is now a plain
+  // once-a-window row and still does not run to midnight, so the daily path
+  // asks the same three questions.
+  function resetIn(t) {
     return t.resetsIn ? t.resetsIn() : msUntilNstMidnight();
   }
-  function allowanceResetAt(t) {
+  function resetAt(t) {
     return t.resetsAt || "midnight NST";
   }
-  function allowanceSpan(t) {
+  function spanOf(t) {
     return t.spanWords || "today";
   }
   function allowanceEvery(t) {
@@ -1583,8 +1602,8 @@
       return {
         ready: false,
         ms: done.endTime - Date.now(),
-        label: (done.why || `done today (${SOURCE_LABEL[done.src] || "marked"})`)
-          + " \u2014 resets at midnight NST",
+        label: (done.why || `done ${spanOf(t)} (${SOURCE_LABEL[done.src] || "marked"})`)
+          + ` \u2014 resets at ${resetAt(t)}`,
         kind: "daily",
       };
     }
@@ -1607,7 +1626,7 @@
       ms: 0,
       label: t.randomStart
         ? "worth a look \u2014 it may not have started, or may be over"
-        : "not done yet today",
+        : `not done yet ${spanOf(t)}`,
       kind: "daily",
     };
   }
@@ -1631,7 +1650,7 @@
           // undefined rather than the figure for a row that does not want
           // it on the clock; timeText falls through to "Ready".
           text: t.hideCount ? undefined : `${live.count}/${live.total}`,
-          label: `${live.count} of ${allowanceSpan(t)}'s ${live.total} taken`
+          label: `${live.count} of ${spanOf(t)}'s ${live.total} taken`
             + " \u2014 read from the page",
           kind: "allowance",
         };
@@ -1639,8 +1658,8 @@
       return {
         ready: false,
         ms: live.endTime - Date.now(),
-        label: `${allowanceSpan(t)}'s ${live.total} are gone`
-          + ` \u2014 resets at ${allowanceResetAt(t)}`,
+        label: `${spanOf(t)}'s ${live.total} are gone`
+          + ` \u2014 resets at ${resetAt(t)}`,
         kind: "allowance",
       };
     }
@@ -1649,7 +1668,7 @@
         ready: false,
         ms: live.endTime - Date.now(),
         label: "the game says you are out of tries"
-          + ` \u2014 resets at ${allowanceResetAt(t)}`,
+          + ` \u2014 resets at ${resetAt(t)}`,
         kind: "allowance",
       };
     }
@@ -2977,7 +2996,7 @@
   function markTitle(t, st) {
     if (t.type === "allowance") {
       return st.ready
-        ? `Out of tries \u2014 stand this down until ${allowanceResetAt(t)}`
+        ? `Out of tries \u2014 stand this down until ${resetAt(t)}`
         : "Not out after all \u2014 put it back to ready";
     }
     return st.ready
@@ -3224,7 +3243,7 @@
     if (t.cadenceWords) return t.cadenceWords;
     if (t.type === "allowance") return t.everyWords || `${t.uses} times a day`;
     if (t.randomStart) return "once a day, random start hour";
-    if (t.type === "daily") return "resets at midnight NST";
+    if (t.type === "daily") return `resets at ${resetAt(t)}`;
     if (t.type === "window") {
       if (t.hourly) {
         const m = todaysWindow(t);
