@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Food Club Reddit Bets
 // @namespace    local-advisor-fork
-// @version      2.1
+// @version      2.2
 // @description  A panel on the Food Club page with one button to the "Food Club" flair feed on r/neopets, where the day's bets are posted, and the NST date its title will carry. It never places, picks or collects a bet.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/pirates/foodclub.phtml*
@@ -45,15 +45,14 @@
 //
 // WHAT IS LEFT OF IT
 //
-// A name and a button. The date, the found-post line and the note about the
-// feed's order were all read once and then stood there being read again
-// every day after, which is a lot of panel for a link.
+// A name, a date and a button. The found-post line and the note about the
+// feed's order are gone: both were read once and then stood there being read
+// again every day after, which is a lot of panel for a link.
 //
-// The date is still worth having, though, because it is the one piece the
-// feed does not give you: the titles are all alike apart from the date, so
-// knowing which to look for is how you tell today's post from the one above
-// it that is still yesterday's. It is on the header as a tooltip, where it
-// costs no room. It is the Neopian date, read off US Pacific rather than off
+// The date stays, because it is the one piece the feed does not give you:
+// the titles are all alike apart from the date, so knowing which to look for
+// is how you tell today's post from the one above it that is still
+// yesterday's. It is the Neopian date, read off US Pacific rather than off
 // wherever you are sitting: past midnight NST in Europe a local date would
 // have you looking for tomorrow's post, which does not exist yet.
 //
@@ -157,6 +156,16 @@
       background: #eaf2fb !important; border-top: 1px solid #bcd3ec !important;
       padding: 6px 8px 8px !important; border-radius: 0 0 9px 9px !important;
     }
+    /* The date the day's post will be titled by, which is what you match by
+       eye once the feed is open. Centred over the button rather than set
+       left, because with nothing else in the body a left-set line reads as
+       the start of a sentence that never arrives. */
+    #npfc-date {
+      color: #1b4f85 !important; font: 11.5px/1.35 ${MUSEO} !important;
+      text-align: center !important; margin: 0 0 6px !important;
+      white-space: nowrap !important; overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
     #npfc-btn {
       /* Flex rather than the house style's block, because the label now has
          the off-site arrow beside it and the two have to centre as one thing.
@@ -259,14 +268,20 @@
     // the game is not the thing in doubt.
     title.textContent = "Food Club Bets";
     head.appendChild(title);
-    // The Neopian date is no longer printed - the panel is a button and a
-    // name - but it is still the thing you match by eye once the feed is
-    // open, so it is kept where it costs no room.
-    head.title = `Today is ${today} NST`;
     panel.appendChild(head);
 
     const body = document.createElement("div");
     body.id = "npfc-body";
+
+    const date = document.createElement("div");
+    date.id = "npfc-date";
+    date.textContent = today;
+    // The only place the panel says which clock that date is on. It is in the
+    // tooltip rather than on the line because "November 27, 2026 NST" is
+    // wider than the panel, and the three letters are the part you can work
+    // out from the other sixteen.
+    date.title = `${today} NST`;
+    body.appendChild(date);
 
     const btn = document.createElement("button");
     btn.id = "npfc-btn";
