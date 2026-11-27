@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Wishing Well
 // @namespace    local-advisor-fork
-// @version      1.2
+// @version      1.3
 // @description  Wishes at the Wishing Well for you, naming an item the well has actually granted lately, up to the seven a twelve-hour window allows. It submits the well's own form and spends 22 NP a wish; SUBMIT_WISHES false fills the form and leaves the click to you.
 // @author       Austin Ryder
 // @contributor  Auto-Wisher by @dogwithglasses (Greasy Fork 532440, MIT); this is a restyled fork
@@ -248,6 +248,31 @@
     else if (!state.windowEnd) state.windowEnd = nextGrantAt();
     save();
     return state.count;
+  }
+
+  // The same rollover, taken while the page sits there rather than only as it
+  // loads. syncCount runs once, at load, which is all the original run needed:
+  // every wish navigates, so the next thing to happen was always another load.
+  // A page left open is the case it never covered \u2014 open the well at 7:50am
+  // with the window spent and the panel reads Done for the next fifty-five
+  // minutes, through a grant that has already wiped the count and past a window
+  // that has already begun.
+  //
+  // Called on an interval rather than a timeout to the exact moment, because
+  // the moment is approximate anyway (see nextGrantAt) and a browser throttles
+  // a background tab's timers to about a minute whatever period is asked for.
+  // A minute late on a time nobody publishes to the minute is close enough.
+  const ROLLOVER_EVERY_MS = 30 * 1000;
+
+  function rollover() {
+    if (!state.windowEnd || Date.now() < state.windowEnd) return;
+    console.info(`${TAG} the window that count belonged to has been granted out; counting from zero again`);
+    state.count = 0;
+    state.windowEnd = 0;
+    save();
+    // Done becomes Start, and a run that stopped because the window was spent
+    // can be started again without reloading the page.
+    render();
   }
 
   function spent() {
@@ -824,6 +849,7 @@
   function run() {
     syncCount();
     render();
+    setInterval(rollover, ROLLOVER_EVERY_MS);
 
     const found = findWishForm();
     if (!found) {
