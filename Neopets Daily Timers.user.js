@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      3.0
+// @version      3.1
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -559,6 +559,64 @@
     },
     { id: "applebobbing", name: "Apple Bobbing", path: "/halloween/applebobbing.phtml", type: "daily" },
     { id: "anchor", name: "Anchor Management", path: "/pirates/anchormanagement.phtml", type: "daily" },
+
+    // Ten bets a round, and the round is not the day: Jellyneo's guide has the
+    // pirates eating from 1:45pm NST, and says that since July 2026 the finish
+    // has been "somewhat random, ranging day-to-day anywhere between 2:15pm and
+    // 7:00pm NST". Betting is shut while they eat, and a fresh round opens
+    // after, so a day can hold the end of one round and the start of the next.
+    //
+    // None of which this row has to work out, because the bet page carries the
+    // server's own answer. #fc-bet-form holds data-bets-placed - the count for
+    // the round in front of you, which foodclub.js re-stamps from the reply to
+    // every bet and which a new round starts at zero. So the row is read, not
+    // counted and not clicked: any bets placed is a yes, none is a no, and the
+    // no is what brings the row back when the round turns over without waiting
+    // for midnight.
+    //
+    // Page-read only, like the Quest Log and the well: a settled() stops the
+    // chain before the click and submit watchers. That is the point here
+    // rather than a side effect - the tabs are AJAX over tab.php, so an armed
+    // request watcher would count opening "Place a Bet" as placing one, and an
+    // armed click watcher would count the tab link, which is a link to this
+    // same path with a query on it.
+    {
+      id: "foodclub",
+      name: "Food Club",
+      path: "/pirates/foodclub.phtml",
+      // The bet tab, since that is the one page here that can answer the
+      // question. The overview can only say whether betting is open at all.
+      href: "/pirates/foodclub.phtml?tab=bet",
+      type: "daily",
+      // On, unlike the three training schools: a row nobody can see is not an
+      // added row, and this one was asked for by name.
+      on: true,
+      note: "Ten bets a round. The row reads the bet page's own count for the round in front of you, so it comes back when a new round opens \u2014 which is any time from about 2:15pm NST \u2014 and not only at midnight. Winnings keep for seven days.",
+      resetsAt: "midnight NST, or sooner when the bet page shows a new round",
+      settled() {
+        // The count the server put on the form, for this round. Read by
+        // attribute rather than by any wording, because it is a number the
+        // page's own script trusts enough to re-stamp after every bet.
+        const form = document.getElementById("fc-bet-form");
+        const placed = Number(form?.getAttribute("data-bets-placed"));
+        if (form && Number.isFinite(placed)) {
+          if (placed <= 0) return false;
+          return `${placed} bet${placed === 1 ? "" : "s"} in for this round`;
+        }
+        // Any other tab, where there is no form to read. #fc-app carries
+        // data-bets-on, and a zero means the pirates are eating: there is
+        // nothing to place until the next round, so the row stands down with
+        // those words rather than claiming you bet. If you forgot, it says
+        // betting is closed, which is the true and useful thing to say.
+        const app = document.getElementById("fc-app");
+        if (app && app.getAttribute("data-bets-on") === "0") {
+          return "betting is closed for this round";
+        }
+        // Betting is open and this page cannot say whether yours are in. Not
+        // a no \u2014 a no here would wipe a reading taken on the bet page.
+        return null;
+      },
+    },
     // The shore is the day whether or not it gives you anything, and on a day
     // it gives you nothing there is nothing on the page to click: a find shows
     // as an object poking out of the sand and collecting it is a click, which
@@ -1005,7 +1063,7 @@
   const DEFAULT_ORDER = [
     "bank", "questlog", "faeriequest", "dome", "trudy", "grundo", "fishing",
     "anchor",
-    "applebobbing", "shrine", "council", "desertedtomb", "shopofoffers",
+    "foodclub", "applebobbing", "shrine", "council", "desertedtomb", "shopofoffers",
     "caverns", "lostinthedark", "forgottenshore", "fruitmachine", "jelly",
     "omelette", "gravedanger", "tombola", "springs", "neggcave", "wiseking",
     "grumpyking", "lottery", "marrow", "dicearoo", "slots", "kikopop",
@@ -1056,6 +1114,7 @@
     fruitmachine: "items/food_desert3.gif",
     applebobbing: "items/spf_slimy_apple.gif",
     anchor: "items/fur_pirate_anchor.gif",
+    foodclub: "items/fatboyburger.gif",
     forgottenshore: "items/bg_forgotten_shore.gif",
     desertedtomb: "items/bd_ger_goldtalisman.gif",
     omelette: "items/om_sausage_pepperoni1.gif",
