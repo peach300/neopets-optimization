@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         # Neopets Daily Timers
 // @namespace    local-advisor-fork
-// @version      3.4
+// @version      3.5
 // @description  One panel on every Neopets page with a live countdown for each timed activity you turn on — cooldowns, midnight-NST dailies and fixed NST windows — with alerts when one comes up and a settings page to pick which to track. Display only: it never clicks, submits or plays for you.
 // @author       Austin Ryder
 // @match        *://www.neopets.com/*
@@ -85,8 +85,11 @@
 //
 // Activities whose timing is random or unknowable from the client: Tarla,
 // Smuggler's Cove, the Kadoatery, faerie quests, restocks, Turmaculus (its
-// waking hours are predicted, not published), Ye Olde Fishing Vortex. A
-// countdown for those would be a made-up number wearing a clock's face.
+// waking hours are predicted, not published). A countdown for those would be
+// a made-up number wearing a clock's face. Ye Olde Fishing Vortex is the one
+// of these that is here anyway, because its wait, random as it is, is a day
+// long and so is worth a row that is roughly right; its own note says as
+// much.
 //
 // Per-day allowances are the fourth kind of row, and they are neither counted
 // nor timed: Coconut Shy, Bagatelle and the Cork Gun Gallery simply say Ready
@@ -475,10 +478,21 @@
     // midnight; Jellyneo's dailies list simply calls it "(Random)", The
     // Daily Neopets says the wait is random but "usually in the 12 to 24
     // hour range", and SunnyNeo says a pet is back "as minimum as 2 hours to
-    // at most 24". Twelve is the figure this counts from: the low end of the
-    // range the two guides agree on, so the row is sometimes green early and
-    // is not green late, and fishing early costs an empty net rather than a
-    // missed day.
+    // at most 24" while also describing it as each pet running "their own 24
+    // hour countdown".
+    //
+    // This counted twelve, the low end of that range, on the argument that
+    // fishing early costs an empty net rather than a missed day. In use that
+    // argument is backwards. The row is not a suggestion to go and try, it is
+    // an answer to "is there anything to do", and at twelve hours it spent
+    // most of every cycle answering yes while the wait was still running - a
+    // green row you walk to the Vortex for and get "Maybe you should be more
+    // patient" from. One that is late instead is a row you fish a little
+    // after you could have, which is the cheaper way round for something
+    // whose wait is a day either way.
+    //
+    // So: twenty-four, the figure SunnyNeo describes the countdown as, and
+    // the top of the range the guides agree on.
     //
     // `refused` is what the page says when you fish before your pet is ready
     // - the catch comes up empty with "Maybe you should be more patient" -
@@ -490,9 +504,12 @@
       name: "Ye Olde Fishing Vortex",
       path: "/water/fishing.phtml",
       type: "interval",
-      mins: 12 * HOUR,
+      mins: 24 * HOUR,
       on: true,
-      note: "Per pet, counted from its last catch \u2014 anywhere from 12 to 24 hours, so this counts the earliest.",
+      note: "Per pet, counted from that pet's last catch \u2014 a day, give or take. The wait is random and sometimes much shorter, so the Vortex may well have you back before this row says so.",
+      // The settings list would otherwise call this "every 24 hours", which
+      // is a cadence this activity does not have.
+      cadenceWords: "about a day, from that pet's last catch",
       refused: /more patient/i,
     },
     {
@@ -1480,13 +1497,22 @@
   // wish either.
   //
   // The slack is for the drift. That 8:00 was read in February 2026 and moves
-  // a few seconds later every day, which by now is a quarter of an hour or so
-  // that nobody is publishing, so the row comes back a little late rather than
-  // promising wishes that have not been granted yet. The Wishing Well script
-  // in this same folder holds its own count three times as long, because there
-  // being early spends 22 NP on a refusal; here it only draws a row.
+  // a few seconds later every day, so the hour it names is early by however
+  // much has accumulated since - at a few seconds a day and the better part of
+  // a year gone, a good deal more than the quarter of an hour this used to
+  // allow. The row came back before the well had wiped anything, which is the
+  // row saying there is something to do when there is not.
+  //
+  // Forty-five minutes, which is what the Wishing Well script in this same
+  // folder has always held its own count for. The two numbers were different
+  // on the grounds that being early there spends 22 NP on a refusal while here
+  // it only draws a row; what that missed is that a row is read instead of
+  // going to look, so an early row costs a trip to the well rather than
+  // nothing. Being late costs less than that in both places: the well prints
+  // "Wish Count: 0" the moment you open it, and this row reads that and goes
+  // ready on the spot.
   const WELL_GRANT_HOURS = [8, 20];
-  const WELL_GRANT_SLACK = 15 * 60_000;
+  const WELL_GRANT_SLACK = 45 * 60_000;
 
   function msUntilWellGrant() {
     const secs = nstSecondsIntoDay();
